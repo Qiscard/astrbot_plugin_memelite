@@ -6,16 +6,10 @@
         "default": true
     },
     "extra_prefix": {
-        "description": "'额外前缀",
+        "description": "额外前缀",
         "hint": "填写后, 需要额外附加一个前缀来触发meme, 留空则不启用",
         "type": "string",
         "default": ""
-    },
-    "fuzzy_match": {
-        "description": "是否模糊匹配触发",
-        "type": "bool",
-        "hint": "消息中含有关键词即可触发meme，谨慎打开，容易误触",
-        "default": false
     },
     "is_compress_image": {
         "description": "是否压缩图片",
@@ -45,5 +39,23 @@
         "type": "list",
         "hint": "黑名单里的关键词会被屏蔽而无法触发meme",
         "default": []
+    },
+    "user_blacklist": {
+        "description": "用户黑名单",
+        "type": "string",
+        "hint": "黑名单中的用户无法使用该插件，多个用户ID用逗号分隔，例如：12345,23456,34567",
+        "default": ""
+    },
+    "protected_users": {
+        "description": "保护名单",
+        "type": "string",
+        "hint": "保护名单中的用户被保护，对他们使用反弹表情会反弹给触发者，多个用户ID用逗号分隔，例如：12345,23456,34567",
+        "default": ""
+    },
+    "bounce_back_memes": {
+        "description": "反弹表情列表",
+        "type": "string",
+        "hint": "指定哪些表情会触发反弹保护，多个表情关键词用逗号分隔，例如：摸,拍,打,踢。留空则所有表情都会触发反弹",
+        "default": ""
     }
 }

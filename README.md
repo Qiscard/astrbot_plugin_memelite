@@ -4,6 +4,8 @@
 
 # astrbot_plugin_memelite
 
+> 维护仓库：[Qiscard/astrbot_plugin_memelite](https://github.com/Qiscard/astrbot_plugin_memelite)  | 基于原版优化升级
+
 _✨ [AstrBot](https://github.com/AstrBotDevs/AstrBot) 表情包制作插件 ✨_  
 
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
@@ -16,10 +18,25 @@ _✨ [AstrBot](https://github.com/AstrBotDevs/AstrBot) 表情包制作插件 ✨
 
 - 本插件负责处理聊天机器人与[表情包生成器 meme-generator](https://github.com/MeetWq/meme-generator) 的对接。
 - 本插件使用本地部署的 meme-generator。同时尽量保持插件的轻量化，表情包生成快，性能要求低。
-- 增强功能：图片过大自动压缩、meme生成超时控制、meme黑名单、智能解析参数、支持@某人/@qq号、支持额外参数传递
+- 增强功能：图片过大自动压缩、meme生成超时控制、meme黑名单、用户黑名单、智能解析参数、支持@某人/@qq号、支持额外参数传递
+- 管理命令需管理员权限；支持保护名单与反弹表情，防止被恶意拿头像合成
+- 已移除模糊匹配，仅首词精确触发，降低误触
 - 同时兼容了 Python 版和 Rust 版的 meme-generator。
 
 ## 📦 安装
+
+### 依赖说明（Pillow 12）
+
+当前默认依赖为 Pillow 12 兼容分支：
+
+```text
+git+https://github.com/Qiscard/meme-generator.git@pillow-12-compat
+```
+
+若环境 Pillow < 12，可改为官方 `meme_generator~=0.1.14`；需要 Rust 版则改为 `meme_generator~=0.2.0`。
+首次安装会从 GitHub 拉取依赖，网络较慢时请耐心等待或手动 pip 安装。
+
+
 
 ### 第一步、安装 meme-generator  
 
@@ -31,7 +48,7 @@ _✨ [AstrBot](https://github.com/AstrBotDevs/AstrBot) 表情包制作插件 ✨
 ### 第二步、安装本插件
 
 - 可以直接在 AstrBot 的插件市场搜索 `astrbot_plugin_memelite`，点击安装，默认安装的是 Python 版本。
-- 如果需要安装Rust 版，请手动下载仓库后，更改requirements.txt中`meme_generator~=0.1.12`为`meme_generator~=0.2.0`。然后将astrbot_plugin_memelite文件夹放入插件目录`data\plugins`，重启Astrbot即可。
+- 如果需要安装Rust 版，请手动下载仓库后，更改requirements.txt中`meme_generator~=0.1.14`为`meme_generator~=0.2.0`。然后将astrbot_plugin_memelite文件夹放入插件目录`data\plugins`，重启Astrbot即可。
 - 装好后不推荐再换版本，如果实在需要切换，请进入Astrbot的虚拟环境，手动删除原来的meme_generator，然后更改requirements.txt中的meme_generator版本号，再重新运行插件的requirements.txt文件安装依赖。
 
 linux 部署时有时会出现依赖报错，请运行下面的脚本安装必要依赖：
@@ -62,11 +79,13 @@ apt-get update && apt-get install -y libgl1 libglib2.0-0
 |---------------------|------------------|---------|
 | `need_prefix`       | 启用触发前缀，需要前缀或 @bot 才能触发 meme | `true` |
 | `extra_prefix`      | 额外前缀，填写后需附加该前缀才能触发，留空不启用 | `""` |
-| `fuzzy_match`       | 模糊匹配触发，消息中含关键词即可触发，易误触 | `false` |
 | `is_compress_image` | 压缩图片，限制生成图长宽不超过 512px 防刷屏 | `true` |
 | `is_check_resources`| 启动时检查资源，缺失资源会自动下载，关闭可优化启动性能 | `true` |
 | `meme_timeout`      | meme 生成超时时长，单位秒 | `15` |
 | `memes_disabled_list`| meme 黑名单，屏蔽其中关键词的触发 | `[]` |
+| `user_blacklist`     | 用户黑名单，逗号分隔用户ID | `""` |
+| `protected_users`    | 保护名单，对名单用户使用反弹表情会反弹给触发者 | `""` |
+| `bounce_back_memes`  | 触发反弹的表情列表；留空表示全部反弹 | `""` |
 
 ## ⌨️ 命令
 
@@ -78,6 +97,12 @@ apt-get update && apt-get install -y libgl1 libglib2.0-0
 |   禁用meme xxx    |   禁用指定meme           |
 |   启用meme xxx    |   启用指定meme           |
 |   meme黑名单     |   查看哪些meme被禁用了        |
+|   添加保护 <qq>    |   将用户加入保护名单（管理员）        |
+|   移除保护 <qq>    |   从保护名单移除用户（管理员）        |
+|   保护名单         |   查看保护名单（管理员）              |
+| 添加反弹表情 xxx   |   指定会触发反弹的表情（管理员）      |
+| 移除反弹表情 xxx   |   移除反弹表情（管理员）              |
+| 反弹表情列表       |   查看反弹表情列表（管理员）          |
 
 关键词包括：
 
