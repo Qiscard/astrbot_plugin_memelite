@@ -25,16 +25,22 @@ _✨ [AstrBot](https://github.com/AstrBotDevs/AstrBot) 表情包制作插件 ✨
 
 ## 📦 安装
 
-### 依赖说明（Pillow 12）
+### 依赖说明
 
-当前默认依赖为 Pillow 12 兼容分支：
+默认依赖（PyPI，便于 AstrBot 自动安装）：
 
 ```text
-git+https://github.com/Qiscard/meme-generator.git@pillow-12-compat
+meme_generator>=0.1.14,<0.2.0
 ```
 
-若环境 Pillow < 12，可改为官方 `meme_generator~=0.1.14`；需要 Rust 版则改为 `meme_generator~=0.2.0`。
-首次安装会从 GitHub 拉取依赖，网络较慢时请耐心等待或手动 pip 安装。
+- 官方 0.1.x 声明 `Pillow<11`。若你的环境已是 Pillow 12，自动安装可能失败。
+- 此时请进入 AstrBot 虚拟环境手动安装兼容分支：
+
+```bash
+pip install "git+https://github.com/Qiscard/meme-generator.git@pillow-12-compat"
+```
+
+- 需要 Rust 版时，将 requirements 改为 `meme_generator>=0.2.0,<0.3.0`。
 
 
 

@@ -1,6 +1,8 @@
-# 默认：Pillow 12 兼容的 Python 版 meme-generator（推荐）
-git+https://github.com/Qiscard/meme-generator.git@pillow-12-compat
-# 官方 PyPI 版本（Pillow < 12 环境可用）:
-# meme_generator~=0.1.14
-# Rust 重构版:
-# meme_generator~=0.2.0
+meme_generator>=0.1.14,<0.2.0
+# 如需 Rust 重构版，改为：
+# meme_generator>=0.2.0,<0.3.0
+#
+# 说明：
+# - 官方 0.1.x 声明 Pillow<11；若环境已是 Pillow 12，安装时可能被 pip 拒绝。
+# - 此时请在 AstrBot 虚拟环境中手动安装兼容分支：
+#   pip install "git+https://github.com/Qiscard/meme-generator.git@pillow-12-compat"
