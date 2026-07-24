@@ -24,18 +24,10 @@ class MemePlugin(Star):
         self.collector = ParamsCollector(config)
         self.manager = MemeManager(config, self.collector)
         self.resources = ResourceInstaller(
-            repo=str(config.get("resource_repo") or "Qiscard/astrbot_plugin_memelite"),
-            release_tag=str(config.get("resource_release_tag") or "assets-v1"),
-            gitee_repo=str(config.get("gitee_resource_repo") or "qiscard/astrbot_plugin_memelite"),
-            gitee_release_tag=str(config.get("gitee_resource_release_tag") or "assets-v1"),
-            gitee_memes_url=str(config.get("gitee_memes_url") or ""),
-            gitee_fonts_url=str(config.get("gitee_fonts_url") or ""),
-            memes_url=str(config.get("memes_url") or ""),
-            fonts_url=str(config.get("fonts_url") or ""),
-            local_memes_dir=str(config.get("local_memes_dir") or ""),
-            local_fonts_dir=str(config.get("local_fonts_dir") or ""),
-            local_memes_zip=str(config.get("local_memes_zip") or ""),
-            local_fonts_zip=str(config.get("local_fonts_zip") or ""),
+            extra_meme_resource_urls=config.get("meme_resource_urls")
+            or config.get("extra_meme_resource_urls")
+            or [],
+            download_timeout=config.get("download_timeout", 180),
         )
         self._bootstrap_task: asyncio.Task | None = None
         self._env_report = detect_environment()
@@ -92,18 +84,42 @@ class MemePlugin(Star):
         except Exception as exc:
             logger.error(f"插件启动检查失败: {exc}")
 
-    @filter.command("meme帮助", alias={"表情帮助", "meme菜单", "meme列表"})
-    async def memes_help(self, event):
+    @filter.command(
+        "meme资源列表",
+        alias={"资源列表", "meme源列表", "meme资源", "表情资源列表"},
+    )
+    async def meme_resource_list(self, event: AstrMessageEvent):
+        """仅发送按名称排序的表情列表图片；资源状态详情只写日志。"""
+        self._sync_resource_settings()
+
+        # detailed status/index -> logs only
+        try:
+            detail = self.resources.resource_list_text()
+            pending = self._pending_config_urls()
+            if pending:
+                detail += "\n\n配置中尚未入库的链接:\n" + "\n".join(
+                    f"- {u}" for u in pending
+                )
+                detail += "\n执行 /meme表情修复 后写入清单。"
+            logger.info("meme资源列表详情:\n%s", detail)
+            logger.info("meme资源状态:\n%s", self.resources.status_text())
+        except Exception as exc:
+            logger.warning("输出资源列表日志失败: %s", exc)
+
         if not self._env_ok:
-            yield event.plain_result(self._env_report.format_message())
+            logger.warning("环境检查未通过，仍尝试渲染表情列表图")
+
+        # ensure latest modules are visible
+        try:
+            self.manager.reload_memes()
+        except Exception:
+            self.manager._load_memes()
+
+        image = await self.manager.render_meme_list_image()
+        if not image:
+            yield event.plain_result("表情列表图生成失败，详情见日志")
             return
-        if output := await self.manager.render_meme_list_image():
-            yield event.chain_result([Comp.Image.fromBytes(output)])
-        else:
-            yield event.plain_result(
-                "meme列表图生成失败。请先执行 /meme检查 查看依赖与资源状态，"
-                "必要时使用 /meme表情修复 与 /meme字体修复"
-            )
+        yield event.chain_result([Comp.Image.fromBytes(image)])
 
     @filter.command("meme详情", alias={"表情详情", "meme信息"})
     async def meme_details_show(
@@ -137,63 +153,66 @@ class MemePlugin(Star):
         parts = [self._env_report.format_message(), "", self.resources.status_text()]
         if self._env_ok:
             parts.append("")
-            parts.append("资源修复命令：")
-            parts.append("- /meme表情修复  (GitHub)")
-            parts.append("- /meme字体修复  (GitHub)")
-            parts.append("- /meme表情修复2 (Gitee 国内镜像)")
-            parts.append("- /meme字体修复2 (Gitee 国内镜像)")
+            parts.append("资源命令：")
+            parts.append("- /meme资源列表  （按名称查看 链接/包/表情清单）")
+            parts.append("- /meme表情修复  （增量安装；加“强制”可全量重装）")
+            parts.append("- /meme字体修复  （默认内置源）")
         yield event.plain_result("\n".join(parts))
 
     @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("meme表情修复", alias={"表情修复", "meme下载表情", "meme资源修复"})
+    @filter.command(
+        "meme表情修复",
+        alias={
+            "表情修复",
+            "meme下载表情",
+            "meme资源修复",
+            "meme表情修复2",
+            "表情修复2",
+            "meme下载表情2",
+            "meme资源修复2",
+            "meme表情修复gitee",
+        },
+    )
     async def meme_fix_images(self, event: AstrMessageEvent):
-        """下载/解压表情资源包到 meme_generator/memes（GitHub）"""
+        """下载/解压表情资源包到 meme_generator/memes（默认增量）"""
+        force = self._wants_force_fix(event)
+        mode = "强制全量" if force else "增量"
         if not self._env_ok:
-            # still allow install of assets, but warn
             yield event.plain_result(
                 "警告：系统依赖检查未通过，先尝试修复表情资源。\n"
                 + self._env_report.format_message()
-                + "\n\n开始表情修复..."
+                + f"\n\n开始表情修复（{mode}）..."
             )
         else:
-            yield event.plain_result("开始表情修复（GitHub），请稍候...")
+            yield event.plain_result(f"开始表情修复（{mode}），请稍候...")
 
-        result = await self.resources.fix_memes()
-        # reload meme list after install
-        self.manager._load_memes()
+        # 运行时读取最新配置（额外链接 / 下载超时）
+        self._sync_resource_settings()
+        result = await self.resources.fix_memes(force=force)
+        # 热重载 meme_generator 注册表，无需重启框架
+        reload_msg = self.manager.reload_memes()
+        logger.info(reload_msg)
         yield event.plain_result(result)
 
     @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("meme字体修复", alias={"字体修复", "meme下载字体", "meme安装字体"})
+    @filter.command(
+        "meme字体修复",
+        alias={
+            "字体修复",
+            "meme下载字体",
+            "meme安装字体",
+            "meme字体修复2",
+            "字体修复2",
+            "meme下载字体2",
+            "meme安装字体2",
+            "meme字体修复gitee",
+        },
+    )
     async def meme_fix_fonts(self, event: AstrMessageEvent):
-        """下载/安装表情字体到用户字体目录（GitHub）"""
-        yield event.plain_result("开始字体修复（GitHub），请稍候...")
+        """下载/安装表情字体到用户字体目录（默认内置源）"""
+        yield event.plain_result("开始字体修复，请稍候...")
+        self._sync_resource_settings()
         result = await self.resources.fix_fonts()
-        yield event.plain_result(result)
-
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("meme表情修复2", alias={"表情修复2", "meme下载表情2", "meme资源修复2", "meme表情修复gitee"})
-    async def meme_fix_images_gitee(self, event: AstrMessageEvent):
-        """从 Gitee 下载/解压表情资源包到 meme_generator/memes"""
-        if not self._env_ok:
-            yield event.plain_result(
-                "警告：系统依赖检查未通过，先尝试从 Gitee 修复表情资源。\n"
-                + self._env_report.format_message()
-                + "\n\n开始表情修复（Gitee）..."
-            )
-        else:
-            yield event.plain_result("开始表情修复（Gitee 国内镜像），请稍候...")
-
-        result = await self.resources.fix_memes_gitee()
-        self.manager._load_memes()
-        yield event.plain_result(result)
-
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("meme字体修复2", alias={"字体修复2", "meme下载字体2", "meme安装字体2", "meme字体修复gitee"})
-    async def meme_fix_fonts_gitee(self, event: AstrMessageEvent):
-        """从 Gitee 下载/安装表情字体到用户字体目录"""
-        yield event.plain_result("开始字体修复（Gitee 国内镜像），请稍候...")
-        result = await self.resources.fix_fonts_gitee()
         yield event.plain_result(result)
 
     @filter.permission_type(PermissionType.ADMIN)
@@ -488,6 +507,61 @@ class MemePlugin(Star):
                             return qq
 
         return None
+
+    def _wants_force_fix(self, event: AstrMessageEvent) -> bool:
+        text = (event.message_str or "").strip().lower()
+        tokens = {"强制", "force", "--force", "-f", "全量", "重装"}
+        return any(tok in text for tok in tokens)
+
+    def _sync_resource_settings(self) -> None:
+        """Refresh runtime resource installer settings from latest config."""
+        self.resources.extra_meme_resource_urls = self._parse_url_list(
+            self.conf.get("meme_resource_urls")
+            or self.conf.get("extra_meme_resource_urls")
+            or []
+        )
+        try:
+            from .core.resources import clamp_download_timeout
+            self.resources.download_timeout = clamp_download_timeout(
+                self.conf.get("download_timeout", 180)
+            )
+        except Exception:
+            pass
+
+    def _pending_config_urls(self) -> list[str]:
+
+        from .core.resources import load_resource_index
+
+        configured = self._parse_url_list(
+            self.conf.get("meme_resource_urls")
+            or self.conf.get("extra_meme_resource_urls")
+            or []
+        )
+        index = load_resource_index()
+        known = {
+            str((src or {}).get("url") or "")
+            for src in (index.get("sources") or {}).values()
+        }
+        return [u for u in configured if u not in known]
+
+    def _parse_url_list(self, value) -> list[str]:
+
+        """Parse multi-line / comma-separated resource URLs."""
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            out: list[str] = []
+            for item in value:
+                out.extend(self._parse_url_list(item))
+            return out
+        text = str(value).replace("，", ",").replace("\r", "\n")
+        parts: list[str] = []
+        for line in text.split("\n"):
+            for item in line.split(","):
+                item = item.strip()
+                if item:
+                    parts.append(item)
+        return parts
 
     def _parse_csv_set(self, value) -> set[str]:
         """解析逗号/列表配置为集合"""

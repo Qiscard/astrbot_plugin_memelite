@@ -6,3 +6,12 @@ __pycache__/
 .pytest_cache/
 _pack_assets.py
 _patch_meme.py
+
+# runtime resource index & cache
+data/
+
+.venv/
+*.zip
+*.tar.gz
+*.tgz
+.part

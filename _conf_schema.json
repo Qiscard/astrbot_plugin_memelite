@@ -20,86 +20,31 @@
     "is_check_resources": {
         "description": "启动时走官方在线资源检查",
         "type": "bool",
-        "hint": "兼容旧逻辑：启动时调用 meme-generator 官方 check_resources 在线下载图片。推荐关闭，改用 /meme表情修复 从本仓库 Release 拉取精简资源包",
+        "hint": "兼容旧逻辑：启动时调用 meme-generator 官方 check_resources 在线下载图片。推荐关闭，改用 /meme表情修复",
         "default": false
     },
     "auto_fix_resources_on_start": {
         "description": "启动时自动修复资源",
         "type": "bool",
-        "hint": "开启后若检测到表情/字体不足，会自动下载本仓库 Release 资源包。默认关闭，建议手动执行 /meme表情修复 与 /meme字体修复",
+        "hint": "开启后若检测到表情/字体不足，会自动下载默认资源包。默认关闭，建议手动执行 /meme表情修复 与 /meme字体修复",
         "default": false
     },
-    "resource_repo": {
-        "description": "资源包仓库",
-        "type": "string",
-        "hint": "GitHub 仓库 owner/name，用于 /meme表情修复 与 /meme字体修复 下载 Release 资源",
-        "default": "Qiscard/astrbot_plugin_memelite"
+    "meme_resource_urls": {
+        "description": "meme资源添加",
+        "type": "list",
+        "hint": "填写 meme 表情资源包直链（zip / tar.gz），可批量添加。执行 /meme表情修复 时会在默认资源之外一并安装。支持套一层文件夹的第三方包，插件会自动识别目录层级。不支持 rar/7z 与仓库主页链接。",
+        "default": []
     },
-    "resource_release_tag": {
-        "description": "资源包 Release 标签",
-        "type": "string",
-        "hint": "Release tag，例如 assets-v1",
-        "default": "assets-v1"
-    },
-    "gitee_resource_repo": {
-        "description": "Gitee 资源包仓库",
-        "type": "string",
-        "hint": "Gitee 仓库 owner/name，供 /meme表情修复2 与 /meme字体修复2 使用",
-        "default": "qiscard/astrbot_plugin_memelite"
-    },
-    "gitee_resource_release_tag": {
-        "description": "Gitee 资源包 Release 标签",
-        "type": "string",
-        "hint": "Gitee Release tag，例如 assets-v1",
-        "default": "assets-v1"
-    },
-    "gitee_memes_url": {
-        "description": "Gitee 表情包直链(可选)",
-        "type": "string",
-        "hint": "填写后 /meme表情修复2 优先使用该 URL 下载 memes.zip",
-        "default": ""
-    },
-    "gitee_fonts_url": {
-        "description": "Gitee 字体包直链(可选)",
-        "type": "string",
-        "hint": "填写后 /meme字体修复2 优先使用该 URL 下载 fonts.zip",
-        "default": ""
-    },
-    "memes_url": {
-        "description": "表情包直链(可选)",
-        "type": "string",
-        "hint": "填写后优先使用该 URL 下载 memes.zip，留空则从 Release 下载",
-        "default": ""
-    },
-    "fonts_url": {
-        "description": "字体包直链(可选)",
-        "type": "string",
-        "hint": "填写后优先使用该 URL 下载 fonts.zip，留空则从 Release 下载",
-        "default": ""
-    },
-    "local_memes_dir": {
-        "description": "本地表情目录(可选)",
-        "type": "string",
-        "hint": "若填写已解压的表情目录路径，/meme表情修复 将直接同步该目录，不走下载",
-        "default": ""
-    },
-    "local_fonts_dir": {
-        "description": "本地字体目录(可选)",
-        "type": "string",
-        "hint": "若填写字体目录路径，/meme字体修复 将直接同步该目录，不走下载",
-        "default": ""
-    },
-    "local_memes_zip": {
-        "description": "本地表情压缩包(可选)",
-        "type": "string",
-        "hint": "本地 memes.zip 路径，优先于在线下载",
-        "default": ""
-    },
-    "local_fonts_zip": {
-        "description": "本地字体压缩包(可选)",
-        "type": "string",
-        "hint": "本地 fonts.zip 路径，优先于在线下载",
-        "default": ""
+    "download_timeout": {
+        "description": "资源下载最大延时（秒）",
+        "type": "int",
+        "hint": "单次下载超时时间，超时将终止并清除未完成缓存。范围 30-300，默认 180",
+        "slider": {
+            "min": 30,
+            "max": 300,
+            "step": 10
+        },
+        "default": 180
     },
     "meme_timeout": {
         "description": "meme生成的超时时长",

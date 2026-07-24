@@ -1,21 +1,7 @@
 # 资源包说明
 
-表情与字体资源包 **不随插件源码分发**，请从 GitHub Release 下载：
+表情与字体资源包默认由插件内置下载源获取（执行 `/meme表情修复` / `/meme字体修复`）。
 
-- Release 标签：`assets-v1`
-- 文件：`memes.zip`、`fonts.zip`
+可选：将 `memes.zip` / `fonts.zip` 放到本目录，修复命令会优先使用本地内置包。
 
-用户侧请在机器人中执行：
-
-```text
-/meme表情修复
-/meme字体修复
-```
-
-开发者本地打包：
-
-```bash
-python _pack_assets.py
-```
-
-输出目录：`assets/dist/`
+第三方额外资源请在插件配置 `meme_resource_urls` 中批量填写 zip / tar.gz 直链。

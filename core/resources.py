@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
+import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
+import tarfile
 import zipfile
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -17,20 +21,161 @@ try:
     from astrbot import logger
 except Exception:  # pragma: no cover - offline tooling
     import logging
-    logger = logging.getLogger('astrbot_plugin_memelite')
 
+    logger = logging.getLogger("astrbot_plugin_memelite")
+
+# Built-in defaults (no user-facing repo/tag config)
 DEFAULT_RELEASE_TAG = "assets-v1"
-DEFAULT_REPO = "Qiscard/astrbot_plugin_memelite"
+DEFAULT_GITHUB_REPO = "Qiscard/astrbot_plugin_memelite"
 DEFAULT_GITEE_REPO = "qiscard/astrbot_plugin_memelite"
 
-# GitHub release asset names
 MEMES_ASSET_NAME = "memes.zip"
 FONTS_ASSET_NAME = "fonts.zip"
 MEMES_PARTS_MANIFEST = "memes.parts.txt"
+DEFAULT_SOURCE_ID = "default"
+INDEX_VERSION = 2
+PLUGIN_DATA_NAME = "astrbot_plugin_memelite"
+DEFAULT_DOWNLOAD_TIMEOUT = 180
+
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+FONT_EXTS = {".ttf", ".otf", ".ttc"}
+LOGIC_EXTS = {".py", ".json", ".toml", ".yaml", ".yml"}
+WRAPPER_DIR_NAMES = {
+    "memes",
+    "fonts",
+    "resources",
+    "resource",
+    "assets",
+    "data",
+    "dist",
+    "output",
+    "package",
+    "meme",
+    "meme-generator",
+    "meme_generator",
+    "images",
+    "img",
+    "static",
+}
 
 
 def get_plugin_root() -> Path:
     return Path(__file__).resolve().parent.parent
+
+
+def get_framework_plugin_data_dir() -> Path:
+    """AstrBot: <root>/data/plugin_data/astrbot_plugin_memelite"""
+    try:
+        from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+        base = Path(get_astrbot_plugin_data_path()) / PLUGIN_DATA_NAME
+    except Exception:
+        plugin = get_plugin_root()
+        if plugin.parent.name == "plugins" and plugin.parent.parent.name == "data":
+            base = plugin.parent.parent / "plugin_data" / PLUGIN_DATA_NAME
+        else:
+            base = plugin / "data"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _ensure_data_layout(root: Path) -> None:
+    for name in ("packages", "cache", "temp", "index"):
+        (root / name).mkdir(parents=True, exist_ok=True)
+
+
+def _migrate_legacy_data(new_root: Path) -> None:
+    legacy = get_plugin_root() / "data"
+    if not legacy.is_dir() or legacy.resolve() == new_root.resolve():
+        return
+    try:
+        old_index = legacy / "resource_index.json"
+        new_index = new_root / "index" / "resource_index.json"
+        if old_index.is_file() and not new_index.is_file():
+            shutil.copy2(old_index, new_index)
+        old_cache = legacy / "cache"
+        if old_cache.is_dir():
+            for f in old_cache.glob("*.zip"):
+                dest = new_root / "packages" / f.name
+                if not dest.exists():
+                    shutil.copy2(f, dest)
+        marker = legacy / ".migrated_to_plugin_data"
+        if not marker.exists():
+            marker.write_text(str(new_root), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("迁移旧 data 目录失败: %s", exc)
+
+
+def get_plugin_data_dir() -> Path:
+    path = get_framework_plugin_data_dir()
+    _ensure_data_layout(path)
+    _migrate_legacy_data(path)
+    return path
+
+
+def get_resource_index_path() -> Path:
+    return get_plugin_data_dir() / "index" / "resource_index.json"
+
+
+def get_packages_dir() -> Path:
+    path = get_plugin_data_dir() / "packages"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_cache_dir() -> Path:
+    path = get_plugin_data_dir() / "cache"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_temp_dir() -> Path:
+    path = get_plugin_data_dir() / "temp"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_package_zip_path(source_id: str) -> Path:
+    """Backward-compatible default package path (.zip)."""
+    return get_package_path(source_id, ".zip")
+
+
+def get_package_path(source_id: str, ext: str = ".zip") -> Path:
+    if not ext.startswith("."):
+        ext = "." + ext
+    return get_packages_dir() / f"{source_id}{ext}"
+
+
+def package_ext_from_url(url: str) -> str:
+    path = (urlparse(url).path or "").lower()
+    if path.endswith(".tar.gz") or path.endswith(".tgz"):
+        return ".tar.gz"
+    if path.endswith(".tar"):
+        return ".tar"
+    if path.endswith(".zip"):
+        return ".zip"
+    return ".zip"
+
+
+def package_candidates(source_id: str) -> list[Path]:
+    d = get_packages_dir()
+    return [
+        d / f"{source_id}.zip",
+        d / f"{source_id}.tar.gz",
+        d / f"{source_id}.tgz",
+        d / f"{source_id}.tar",
+    ]
+
+
+def is_supported_archive(path: Path) -> bool:
+    return detect_archive_format(path) in {"zip", "tar.gz", "tar", "tgz"}
+
+
+def clamp_download_timeout(value, default: int = DEFAULT_DOWNLOAD_TIMEOUT) -> int:
+    try:
+        n = int(value)
+    except Exception:
+        n = default
+    return max(30, min(300, n))
 
 
 def get_meme_package_dir() -> Path | None:
@@ -50,32 +195,36 @@ def get_memes_target_dir() -> Path | None:
 def get_user_fonts_dir() -> Path:
     if sys.platform.startswith("win"):
         local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-        # Per-user fonts (Windows 10+)
         return Path(local) / "Microsoft" / "Windows" / "Fonts"
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Fonts"
-    # Linux / Docker
     return Path.home() / ".local" / "share" / "fonts" / "meme-generator"
 
 
 def count_meme_image_files(memes_dir: Path | None) -> int:
     if not memes_dir or not memes_dir.is_dir():
         return 0
-    exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-    return sum(1 for p in memes_dir.rglob("*") if p.is_file() and p.suffix.lower() in exts)
+    return sum(
+        1
+        for p in memes_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+    )
 
 
 def count_installed_meme_fonts(fonts_dir: Path | None = None) -> int:
     fonts_dir = fonts_dir or get_user_fonts_dir()
     if not fonts_dir.is_dir():
         return 0
-    exts = {".ttf", ".otf", ".ttc"}
-    return sum(1 for p in fonts_dir.iterdir() if p.is_file() and p.suffix.lower() in exts)
+    return sum(
+        1 for p in fonts_dir.iterdir() if p.is_file() and p.suffix.lower() in FONT_EXTS
+    )
 
 
-def _release_asset_urls(repo: str, tag: str, filename: str) -> list[str]:
-    """Prefer multiple mirrors for GitHub release assets."""
-    base = f"https://github.com/{repo}/releases/download/{tag}/{filename}"
+def _github_urls(filename: str) -> list[str]:
+    base = (
+        f"https://github.com/{DEFAULT_GITHUB_REPO}/releases/download/"
+        f"{DEFAULT_RELEASE_TAG}/{filename}"
+    )
     return [
         base,
         f"https://mirror.ghproxy.com/{base}",
@@ -84,15 +233,126 @@ def _release_asset_urls(repo: str, tag: str, filename: str) -> list[str]:
     ]
 
 
-def _gitee_release_asset_urls(repo: str, tag: str, filename: str) -> list[str]:
-    """Gitee release asset download URLs for domestic mirror channel."""
+def _gitee_urls(filename: str) -> list[str]:
     return [
-        f"https://gitee.com/{repo}/releases/download/{tag}/{filename}",
+        f"https://gitee.com/{DEFAULT_GITEE_REPO}/releases/download/"
+        f"{DEFAULT_RELEASE_TAG}/{filename}"
     ]
 
 
+def default_memes_urls() -> list[str]:
+    return _gitee_urls(MEMES_ASSET_NAME) + _github_urls(MEMES_ASSET_NAME)
+
+
+def default_fonts_urls() -> list[str]:
+    return _gitee_urls(FONTS_ASSET_NAME) + _github_urls(FONTS_ASSET_NAME)
+
+
+def default_parts_manifest_urls() -> list[str]:
+    return _gitee_urls(MEMES_PARTS_MANIFEST) + _github_urls(MEMES_PARTS_MANIFEST)
+
+
+def default_part_urls(part_name: str) -> list[str]:
+    return _gitee_urls(part_name) + _github_urls(part_name)
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _source_id_from_url(url: str) -> str:
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
+    name = Path(urlparse(url).path).name or "pack"
+    name = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in name)
+    return f"extra_{name}_{digest}"
+
+
+def _safe_unlink(path: Path | None) -> None:
+    if not path:
+        return
+    try:
+        if path.is_file():
+            path.unlink(missing_ok=True)
+        elif path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def detect_archive_format(path: Path) -> str:
+    """Return archive kind: zip / tar.gz / tar / rar / 7z / unknown / empty."""
+    try:
+        if not path or not path.is_file() or path.stat().st_size <= 0:
+            return "empty"
+        with path.open("rb") as f:
+            head = f.read(16)
+    except Exception:
+        return "unknown"
+
+    name = path.name.lower()
+    if head[:2] == b"PK" or zipfile.is_zipfile(path):
+        return "zip"
+    if head[:4] == b"Rar!":
+        return "rar"
+    if head[:2] == b"7z":
+        return "7z"
+    # gzip header -> usually .tar.gz / .tgz
+    if len(head) >= 2 and head[0] == 0x1F and head[1] == 0x8B:
+        if name.endswith(".tar.gz") or name.endswith(".tgz") or name.endswith(".tar.gzip"):
+            return "tar.gz"
+        try:
+            with tarfile.open(path, "r:gz") as tf:
+                if tf.getmembers():
+                    return "tar.gz"
+        except Exception:
+            return "gzip"
+        return "tar.gz"
+    if name.endswith(".tar.gz") or name.endswith(".tgz"):
+        return "tar.gz"
+    if name.endswith(".tar") or tarfile.is_tarfile(path):
+        return "tar"
+    if name.endswith(".zip"):
+        return "zip"
+    if name.endswith(".rar"):
+        return "rar"
+    if name.endswith(".7z"):
+        return "7z"
+    return "unknown"
+
+
+def describe_unsupported_archive(path: Path) -> str:
+    kind = detect_archive_format(path)
+    if kind in {"zip", "tar.gz", "tar", "tgz"}:
+        return ""
+    if kind == "rar":
+        return (
+            f"检测到 RAR 资源包: {path.name}。"
+            "当前支持 ZIP / tar.gz（需要内部是 Python meme 模块：表情名/__init__.py+图片）。"
+            "请将 .rar 转为 .zip 或 .tar.gz 后重新配置直链。"
+        )
+    if kind == "7z":
+        return (
+            f"检测到 7z 资源包: {path.name}。"
+            "当前支持 ZIP / tar.gz，请转换后重试。"
+        )
+    if kind == "gzip":
+        return (
+            f"检测到 gzip 文件但无法按 tar.gz 打开: {path.name}。"
+            "请使用 .tar.gz（而不是单独的 .gz）。"
+        )
+    if kind == "empty":
+        return f"资源包为空或下载不完整: {path}"
+    return (
+        f"不是有效的资源包: {path}（识别格式: {kind}）。"
+        "请使用 ZIP 或 tar.gz 直链；RAR/7z 需先转换。"
+    )
+
+
 def _join_part_files(part_paths: list[Path], dest: Path) -> int:
-    """Concatenate split zip parts into dest. Returns total bytes written."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     total = 0
     tmp = dest.with_suffix(dest.suffix + ".joining")
@@ -105,66 +365,138 @@ def _join_part_files(part_paths: list[Path], dest: Path) -> int:
     return total
 
 
-async def _download_to_path(
-    session: aiohttp.ClientSession,
-    urls: list[str],
-    dest: Path,
-    progress_cb: Callable[[str], None] | None = None,
-) -> None:
-    last_error: Exception | None = None
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    for url in urls:
+def _looks_like_meme_module(path: Path) -> bool:
+    """Python meme module: requires .py (usually __init__.py) + assets/config."""
+    if not path.is_dir():
+        return False
+    name = path.name.lower()
+    if name in WRAPPER_DIR_NAMES or name.startswith("__"):
+        return False
+    # reject common non-python package names / rust repos
+    if name.endswith(("-rs", "_rs")) or "contrib-rs" in name:
+        return False
+    if (path / "Cargo.toml").exists() or (path / "Cargo.lock").exists():
+        return False
+
+    has_py = False
+    has_asset = False
+    has_meme_meta = False
+    try:
+        children = list(path.iterdir())
+    except OSError:
+        return False
+
+    for child in children:
+        cname = child.name.lower()
+        if child.is_file():
+            if child.suffix.lower() == ".py":
+                has_py = True
+            if cname in {"config.json", "meme.toml", "meme.json", "meme.yaml", "meme.yml"}:
+                has_meme_meta = True
+            if child.suffix.lower() in IMAGE_EXTS:
+                has_asset = True
+        elif child.is_dir() and cname in {
+            "images",
+            "image",
+            "img",
+            "assets",
+            "static",
+            "resource",
+            "resources",
+            "gif",
+            "png",
+        }:
+            if any(p.is_file() for p in child.rglob("*")):
+                has_asset = True
+    # Python meme modules always ship with .py entry
+    return has_py and (has_asset or has_meme_meta or (path / "__init__.py").exists())
+
+
+def _score_meme_root(path: Path) -> int:
+    if not path.is_dir():
+        return -1
+    try:
+        children = [c for c in path.iterdir() if c.is_dir() and not c.name.startswith(".")]
+    except OSError:
+        return -1
+    module_count = sum(1 for c in children if _looks_like_meme_module(c))
+    score = module_count * 10
+    if module_count >= 3:
+        score += 20
+    if path.name.lower() in {"memes", "meme"}:
+        score += 5
+    return score
+
+
+def find_memes_content_root(extract_dir: Path) -> Path:
+    best: Path | None = None
+    best_score = -1
+    candidates = [extract_dir]
+    try:
+        for p in extract_dir.rglob("*"):
+            if not p.is_dir():
+                continue
+            try:
+                rel = p.relative_to(extract_dir)
+            except ValueError:
+                continue
+            if len(rel.parts) > 6:
+                continue
+            candidates.append(p)
+    except OSError:
+        pass
+
+    for cand in candidates:
+        score = _score_meme_root(cand)
+        if score > best_score:
+            best_score = score
+            best = cand
+
+    if best is not None and best_score > 0:
+        return best
+
+    cur = extract_dir
+    for _ in range(5):
         try:
-            if progress_cb:
-                progress_cb(f"尝试下载: {url}")
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=600)) as resp:
-                if resp.status != 200:
-                    last_error = RuntimeError(f"HTTP {resp.status} for {url}")
-                    continue
-                total = int(resp.headers.get("Content-Length") or 0)
-                downloaded = 0
-                tmp = dest.with_suffix(dest.suffix + ".part")
-                with tmp.open("wb") as f:
-                    async for chunk in resp.content.iter_chunked(1024 * 256):
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                tmp.replace(dest)
-                if progress_cb:
-                    mb = downloaded / 1024 / 1024
-                    msg = f"下载完成: {mb:.1f} MB"
-                    if total:
-                        msg += f" / {total/1024/1024:.1f} MB"
-                    progress_cb(msg)
-                return
-        except Exception as exc:
-            last_error = exc
-            logger.warning(f"下载失败 {url}: {exc}")
-    raise RuntimeError(f"所有镜像下载失败: {last_error}")
+            kids = [c for c in cur.iterdir() if not c.name.startswith(".")]
+        except OSError:
+            break
+        dirs = [c for c in kids if c.is_dir()]
+        files = [c for c in kids if c.is_file()]
+        if len(dirs) == 1 and not files:
+            cur = dirs[0]
+            continue
+        if len(dirs) == 1 and all(
+            f.name.lower() in {"readme.md", "license", "license.txt"} for f in files
+        ):
+            cur = dirs[0]
+            continue
+        break
+    return cur
 
 
-def _safe_extract_zip(zip_path: Path, target_dir: Path) -> int:
-    """Extract zip into target_dir. Returns number of files written."""
+def _safe_relpath(name: str) -> str | None:
+    name = name.replace("\\", "/")
+    if not name or name.endswith("/"):
+        return None
+    parts = [p for p in name.split("/") if p not in ("", ".")]
+    if not parts or any(p == ".." for p in parts):
+        return None
+    return "/".join(parts)
+
+
+def _extract_zip_raw(zip_path: Path, target_dir: Path) -> int:
     target_dir.mkdir(parents=True, exist_ok=True)
     count = 0
     with zipfile.ZipFile(zip_path, "r") as zf:
         for info in zf.infolist():
-            # zip-slip guard
-            name = info.filename.replace("\\", "/")
-            if name.endswith("/"):
-                continue
-            # strip a single top-level memes/ or fonts/ prefix if present
-            parts = name.split("/")
-            if parts and parts[0].lower() in {"memes", "fonts", "resources"}:
-                # keep nested structure under that prefix stripped once
-                if parts[0].lower() == "resources" and len(parts) > 1 and parts[1].lower() == "fonts":
-                    rel = "/".join(parts[2:])
-                else:
-                    rel = "/".join(parts[1:])
-            else:
-                rel = name
-            if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+            rel = _safe_relpath(info.filename)
+            if not rel:
                 continue
             out_path = target_dir / rel
+            if info.is_dir() or info.filename.endswith("/"):
+                out_path.mkdir(parents=True, exist_ok=True)
+                continue
             out_path.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(info, "r") as src, out_path.open("wb") as dst:
                 shutil.copyfileobj(src, dst)
@@ -172,22 +504,122 @@ def _safe_extract_zip(zip_path: Path, target_dir: Path) -> int:
     return count
 
 
-def _copy_tree_files(src: Path, dest: Path) -> int:
-    if not src.is_dir():
-        raise FileNotFoundError(f"源目录不存在: {src}")
-    dest.mkdir(parents=True, exist_ok=True)
+def _extract_tar_raw(tar_path: Path, target_dir: Path) -> int:
+    """Extract tar / tar.gz safely (no path traversal)."""
+    target_dir.mkdir(parents=True, exist_ok=True)
     count = 0
-    for path in src.rglob("*"):
-        if not path.is_file():
-            continue
-        if path.name.lower() == "memes.rar":
-            continue
-        rel = path.relative_to(src)
-        out = dest / rel
-        out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, out)
-        count += 1
+    # r:* auto-detects gz/bz2/xz when possible
+    with tarfile.open(tar_path, "r:*") as tf:
+        for member in tf.getmembers():
+            rel = _safe_relpath(member.name)
+            if not rel:
+                continue
+            out_path = target_dir / rel
+            if member.isdir():
+                out_path.mkdir(parents=True, exist_ok=True)
+                continue
+            if not member.isfile():
+                # skip links/devices
+                continue
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            src = tf.extractfile(member)
+            if src is None:
+                continue
+            with src, out_path.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+            count += 1
     return count
+
+
+def _extract_archive_raw(archive_path: Path, target_dir: Path) -> int:
+    kind = detect_archive_format(archive_path)
+    if kind == "zip":
+        return _extract_zip_raw(archive_path, target_dir)
+    if kind in {"tar.gz", "tar", "tgz"}:
+        return _extract_tar_raw(archive_path, target_dir)
+    msg = describe_unsupported_archive(archive_path) or f"不支持的压缩格式: {archive_path}"
+    raise RuntimeError(msg)
+
+
+def list_meme_modules(content_root: Path) -> list[Path]:
+    if _looks_like_meme_module(content_root):
+        return [content_root]
+    modules = [
+        c
+        for c in content_root.iterdir()
+        if c.is_dir() and _looks_like_meme_module(c)
+    ]
+    return sorted(modules, key=lambda p: p.name.lower())
+
+
+def _copy_meme_modules(src_root: Path, dest: Path) -> tuple[int, list[str], str]:
+    dest.mkdir(parents=True, exist_ok=True)
+    content_root = find_memes_content_root(src_root)
+    modules = list_meme_modules(content_root)
+    if modules:
+        count = 0
+        installed: list[str] = []
+        for mod in modules:
+            out = dest / mod.name
+            if out.exists():
+                shutil.rmtree(out, ignore_errors=True)
+            shutil.copytree(mod, out)
+            count += sum(1 for _ in out.rglob("*") if _.is_file())
+            installed.append(mod.name)
+        note = (
+            f"检测到资源根目录: "
+            f"{content_root.relative_to(src_root) if content_root != src_root else '.'}"
+        )
+        return count, sorted(set(installed), key=str.lower), note
+    return (
+        0,
+        [],
+        "未识别到可用的 meme 模块（需要 <表情名>/逻辑文件+图片）。"
+        "源码仓/纯图片包不能直接作为 Python meme 资源安装。",
+    )
+
+
+def install_memes_from_zip(zip_path: Path, target_dir: Path) -> tuple[int, str, list[str]]:
+    """Install memes from zip/tar.gz archive. Name kept for compatibility."""
+    return install_memes_from_archive(zip_path, target_dir)
+
+
+def install_memes_from_archive(
+    archive_path: Path, target_dir: Path
+) -> tuple[int, str, list[str]]:
+    work = Path(tempfile.mkdtemp(prefix="meme_extract_", dir=str(get_temp_dir())))
+    try:
+        raw = work / "raw"
+        n = _extract_archive_raw(archive_path, raw)
+        if n <= 0:
+            raise RuntimeError(f"压缩包为空: {archive_path}")
+        written, memes, note = _copy_meme_modules(raw, target_dir)
+        if written <= 0 or not memes:
+            raise RuntimeError(note or "压缩包中没有可安装的 meme 模块")
+        kind = detect_archive_format(archive_path)
+        if note:
+            note = f"[{kind}] {note}"
+        return written, note, memes
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def install_fonts_from_zip(zip_path: Path, target_dir: Path) -> int:
+    """Install fonts from zip/tar.gz archive."""
+    target_dir.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="font_extract_", dir=str(get_temp_dir())))
+    try:
+        raw = work / "raw"
+        _extract_archive_raw(zip_path, raw)
+        count = 0
+        for path in raw.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in FONT_EXTS:
+                continue
+            shutil.copy2(path, target_dir / path.name)
+            count += 1
+        return count
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def _refresh_font_cache() -> str | None:
@@ -196,42 +628,165 @@ def _refresh_font_cache() -> str | None:
         if not fc:
             return "未找到 fc-cache，请安装 fontconfig 后手动执行: fc-cache -fv"
         try:
-            subprocess_run = __import__("subprocess").run
-            subprocess_run([fc, "-fv"], capture_output=True, text=True, timeout=120, check=False)
+            subprocess.run(
+                [fc, "-fv"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
             return None
         except Exception as exc:
             return f"fc-cache 执行失败: {exc}"
     return None
 
 
+def _normalize_url_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.replace("，", ",").replace("\r", "\n")
+        parts: list[str] = []
+        for line in text.split("\n"):
+            for item in line.split(","):
+                item = item.strip()
+                if item:
+                    parts.append(item)
+        return parts
+    if isinstance(value, (list, tuple, set)):
+        out: list[str] = []
+        for item in value:
+            out.extend(_normalize_url_list(item))
+        return out
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _empty_index() -> dict[str, Any]:
+    return {"version": INDEX_VERSION, "updated_at": 0, "sources": {}}
+
+
+def load_resource_index() -> dict[str, Any]:
+    path = get_resource_index_path()
+    legacy = get_plugin_root() / "data" / "resource_index.json"
+    read_path = path if path.is_file() else legacy
+    if not read_path.is_file():
+        return _empty_index()
+    try:
+        data = json.loads(read_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return _empty_index()
+        data.setdefault("version", INDEX_VERSION)
+        data.setdefault("sources", {})
+        if not isinstance(data["sources"], dict):
+            data["sources"] = {}
+        return data
+    except Exception as exc:
+        logger.warning("读取 resource_index.json 失败: %s", exc)
+        return _empty_index()
+
+
+def save_resource_index(index: dict[str, Any]) -> None:
+    index["version"] = INDEX_VERSION
+    index["updated_at"] = int(time.time())
+    path = get_resource_index_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def meme_module_exists(target_dir: Path | None, name: str) -> bool:
+    if not target_dir:
+        return False
+    path = target_dir / name
+    return _looks_like_meme_module(path)
+
+
+def source_memes_present(target_dir: Path | None, memes: list[str]) -> bool:
+    if not memes:
+        return False
+    return all(meme_module_exists(target_dir, name) for name in memes)
+
+
+async def _download_to_path(
+    session: aiohttp.ClientSession,
+    urls: list[str],
+    dest: Path,
+    progress_cb: Callable[[str], None] | None = None,
+    timeout_sec: int = DEFAULT_DOWNLOAD_TIMEOUT,
+) -> None:
+    """Download first successful URL into dest.
+
+    timeout_sec is hard-capped to 30-300. On timeout/failure the .part cache is removed.
+    """
+    timeout_sec = clamp_download_timeout(timeout_sec)
+    last_error: Exception | None = None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    for url in urls:
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        _safe_unlink(tmp)
+        try:
+            if progress_cb:
+                progress_cb(f"尝试下载: {url}（超时 {timeout_sec}s）")
+            client_timeout = aiohttp.ClientTimeout(
+                total=timeout_sec,
+                connect=min(30, timeout_sec),
+                sock_connect=min(30, timeout_sec),
+                sock_read=timeout_sec,
+            )
+            started = time.monotonic()
+            async with session.get(url, timeout=client_timeout) as resp:
+                if resp.status != 200:
+                    last_error = RuntimeError(f"HTTP {resp.status} for {url}")
+                    continue
+                total = int(resp.headers.get("Content-Length") or 0)
+                downloaded = 0
+                with tmp.open("wb") as f:
+                    async for chunk in resp.content.iter_chunked(1024 * 256):
+                        if time.monotonic() - started > timeout_sec:
+                            raise asyncio.TimeoutError(
+                                f"下载超过 {timeout_sec} 秒"
+                            )
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                if downloaded <= 0:
+                    raise RuntimeError(f"空响应: {url}")
+                tmp.replace(dest)
+                if progress_cb:
+                    mb = downloaded / 1024 / 1024
+                    msg = f"下载完成: {mb:.1f} MB"
+                    if total:
+                        msg += f" / {total / 1024 / 1024:.1f} MB"
+                    progress_cb(msg)
+                return
+        except asyncio.TimeoutError as exc:
+            last_error = RuntimeError(f"下载超时({timeout_sec}s): {url}")
+            _safe_unlink(tmp)
+            # also clear incomplete final dest if partially replaced somehow
+            if dest.is_file() and dest.stat().st_size <= 0:
+                _safe_unlink(dest)
+            logger.warning("下载超时 %s: %s", url, exc)
+            if progress_cb:
+                progress_cb(str(last_error) + "，已清除缓存")
+        except Exception as exc:
+            last_error = exc
+            _safe_unlink(tmp)
+            logger.warning(f"下载失败 {url}: {exc}")
+            if progress_cb:
+                progress_cb(f"下载失败: {url} -> {exc}")
+    raise RuntimeError(f"所有下载源失败: {last_error}")
+
+
 class ResourceInstaller:
     def __init__(
         self,
-        repo: str = DEFAULT_REPO,
-        release_tag: str = DEFAULT_RELEASE_TAG,
-        gitee_repo: str = DEFAULT_GITEE_REPO,
-        gitee_release_tag: str = DEFAULT_RELEASE_TAG,
-        gitee_memes_url: str = "",
-        gitee_fonts_url: str = "",
-        memes_url: str = "",
-        fonts_url: str = "",
-        local_memes_dir: str = "",
-        local_fonts_dir: str = "",
-        local_memes_zip: str = "",
-        local_fonts_zip: str = "",
+        extra_meme_resource_urls=None,
+        download_timeout=DEFAULT_DOWNLOAD_TIMEOUT,
     ):
-        self.repo = repo or DEFAULT_REPO
-        self.release_tag = release_tag or DEFAULT_RELEASE_TAG
-        self.gitee_repo = gitee_repo or DEFAULT_GITEE_REPO
-        self.gitee_release_tag = gitee_release_tag or DEFAULT_RELEASE_TAG
-        self.gitee_memes_url = (gitee_memes_url or "").strip()
-        self.gitee_fonts_url = (gitee_fonts_url or "").strip()
-        self.memes_url = (memes_url or "").strip()
-        self.fonts_url = (fonts_url or "").strip()
-        self.local_memes_dir = (local_memes_dir or "").strip()
-        self.local_fonts_dir = (local_fonts_dir or "").strip()
-        self.local_memes_zip = (local_memes_zip or "").strip()
-        self.local_fonts_zip = (local_fonts_zip or "").strip()
+        self.extra_meme_resource_urls = _normalize_url_list(extra_meme_resource_urls)
+        self.download_timeout = clamp_download_timeout(download_timeout)
         self._session: aiohttp.ClientSession | None = None
         self._memes_lock = asyncio.Lock()
         self._fonts_lock = asyncio.Lock()
@@ -247,11 +802,42 @@ class ResourceInstaller:
         if self._session and not self._session.closed:
             await self._session.close()
 
+    def _upsert_source(
+        self,
+        index: dict[str, Any],
+        *,
+        source_id: str,
+        name: str,
+        url: str,
+        sha256: str,
+        memes: list[str],
+        status: str,
+        note: str = "",
+        file_count: int = 0,
+        package_path: str = "",
+    ) -> None:
+        sources = index.setdefault("sources", {})
+        pkg = package_path or str(get_package_zip_path(source_id))
+        sources[source_id] = {
+            "id": source_id,
+            "name": name,
+            "url": url,
+            "sha256": sha256,
+            "memes": sorted(set(memes), key=str.lower),
+            "status": status,
+            "note": note,
+            "file_count": file_count,
+            "package_path": pkg,
+            "installed_at": int(time.time()),
+        }
+
     def status_text(self) -> str:
         memes_dir = get_memes_target_dir()
         fonts_dir = get_user_fonts_dir()
         img_count = count_meme_image_files(memes_dir)
         font_count = count_installed_meme_fonts(fonts_dir)
+        index = load_resource_index()
+        sources = index.get("sources") or {}
         lines = [
             "资源状态：",
             f"- meme_generator: {'已安装' if get_meme_package_dir() else '未安装'}",
@@ -259,43 +845,411 @@ class ResourceInstaller:
             f"- 表情图片文件数: {img_count}",
             f"- 字体安装目录: {fonts_dir}",
             f"- 字体文件数: {font_count}",
-            f"- 资源版本标签: {self.release_tag}",
-            f"- 资源仓库(GitHub): {self.repo}",
-            f"- Gitee 资源仓库: {self.gitee_repo}",
-            f"- Gitee 资源标签: {self.gitee_release_tag}",
+            f"- 资源源数量: {len(sources)}",
+            f"- 额外配置链接: {len(self.extra_meme_resource_urls)} 条",
+            f"- 下载超时: {self.download_timeout}s（30-300）",
+            f"- 插件数据目录: {get_plugin_data_dir()}",
+            "- 安装策略: 本地包优先 + 增量（hash 未变且表情在位则跳过）",
         ]
-        if img_count < 50:
-            lines.append("- 表情资源可能未完整安装，请执行 /meme表情修复 或 /meme表情修复2(Gitee)")
+        missing_sources = 0
+        error_sources = 0
+        for src in sources.values():
+            if str(src.get("status") or "") == "error":
+                error_sources += 1
+                continue
+            memes = list(src.get("memes") or [])
+            if memes and not source_memes_present(memes_dir, memes):
+                missing_sources += 1
+        if missing_sources:
+            lines.append(f"- 不完整资源源: {missing_sources}")
+        if error_sources:
+            lines.append(f"- 失败资源源: {error_sources}（见 /meme资源列表）")
+        if img_count < 50 and not sources:
+            lines.append("- 表情资源可能未完整安装，请执行 /meme表情修复")
         if font_count < 3:
-            lines.append("- 字体可能未安装，请执行 /meme字体修复 或 /meme字体修复2(Gitee)")
+            lines.append("- 字体可能未安装，请执行 /meme字体修复")
         return "\n".join(lines)
 
-    async def fix_memes(self, progress_cb: Callable[[str], None] | None = None) -> str:
+    def resource_list_text(self) -> str:
+        """Text list sorted by source name, then meme names."""
+        index = load_resource_index()
+        sources = list((index.get("sources") or {}).values())
+        target = get_memes_target_dir()
+
+        if not sources:
+            return (
+                "资源列表为空。\n"
+                "请先执行 /meme表情修复 安装默认资源，"
+                "或在配置 meme_resource_urls 中添加额外链接后再修复。"
+            )
+
+        sources_sorted = sorted(
+            sources,
+            key=lambda s: str(s.get("name") or s.get("id") or "").lower(),
+        )
+        lines: list[str] = ["meme 资源列表（按名称排序）", ""]
+        all_memes: set[str] = set()
+
+        for src in sources_sorted:
+            name = str(src.get("name") or src.get("id") or "unknown")
+            sid = str(src.get("id") or "")
+            url = str(src.get("url") or "")
+            status = str(src.get("status") or "unknown")
+            memes = sorted(set(src.get("memes") or []), key=str.lower)
+            present = [m for m in memes if meme_module_exists(target, m)]
+            missing = [m for m in memes if m not in present]
+            all_memes.update(memes)
+
+            sha = str(src.get("sha256") or "")
+            sha_short = (sha[:10] + "...") if len(sha) > 10 else (sha or "-")
+            lines.append(f"[{name}]")
+            lines.append(f"  id: {sid}")
+            lines.append(f"  状态: {status}")
+            lines.append(f"  hash: {sha_short}")
+            if url:
+                lines.append(f"  链接: {url}")
+            lines.append(f"  表情数: {len(memes)} (在位 {len(present)} / 缺失 {len(missing)})")
+            if memes:
+                # sorted meme names, plain text for now
+                lines.append("  表情: " + ", ".join(memes))
+            if missing:
+                lines.append("  缺失: " + ", ".join(missing))
+            lines.append("")
+
+        lines.append(f"合计资源源: {len(sources_sorted)}")
+        lines.append(f"合计表情名: {len(all_memes)}")
+        return "\n".join(lines).rstrip()
+
+    async def fix_memes(
+        self,
+        progress_cb: Callable[[str], None] | None = None,
+        force: bool = False,
+    ) -> str:
         async with self._memes_lock:
-            return await self._fix_memes_unlocked(progress_cb, source="github")
+            return await self._fix_memes_unlocked(progress_cb, force=force)
 
     async def fix_fonts(self, progress_cb: Callable[[str], None] | None = None) -> str:
         async with self._fonts_lock:
-            return await self._fix_fonts_unlocked(progress_cb, source="github")
+            return await self._fix_fonts_unlocked(progress_cb)
 
-    async def fix_memes_gitee(self, progress_cb: Callable[[str], None] | None = None) -> str:
-        """Install meme images from Gitee Release (domestic channel)."""
-        async with self._memes_lock:
-            return await self._fix_memes_unlocked(progress_cb, source="gitee")
+    async def fix_memes_gitee(
+        self, progress_cb: Callable[[str], None] | None = None
+    ) -> str:
+        return await self.fix_memes(progress_cb)
 
-    async def fix_fonts_gitee(self, progress_cb: Callable[[str], None] | None = None) -> str:
-        """Install fonts from Gitee Release (domestic channel)."""
-        async with self._fonts_lock:
-            return await self._fix_fonts_unlocked(progress_cb, source="gitee")
+    async def fix_fonts_gitee(
+        self, progress_cb: Callable[[str], None] | None = None
+    ) -> str:
+        return await self.fix_fonts(progress_cb)
 
-    async def _fix_memes_unlocked(
-        self, progress_cb: Callable[[str], None] | None = None, source: str = "github"
+    def _should_skip_source(
+        self,
+        index: dict[str, Any],
+        source_id: str,
+        url: str,
+        target: Path | None,
+        force: bool,
+    ) -> tuple[bool, str]:
+        if force:
+            return False, "强制重装"
+        src = (index.get("sources") or {}).get(source_id)
+        if not src:
+            return False, "新资源源"
+        if str(src.get("status") or "") == "error":
+            note = str(src.get("note") or "")
+            local = self._resolve_local_package(source_id)
+            # permanently unusable package with unchanged local hash: don't loop forever
+            if local and local.is_file() and ("未识别到可用的 meme 模块" in note or "没有可安装" in note):
+                try:
+                    sha = _sha256_file(local)
+                    if sha and sha == str(src.get("sha256") or ""):
+                        # keep error status but drop fake meme names
+                        if src.get("memes"):
+                            src["memes"] = []
+                            src["file_count"] = 0
+                        return True, "不可用资源包（格式不支持，已记录）"
+                except Exception:
+                    pass
+            return False, "上次安装失败，重试"
+        if str(src.get("url") or "") != url:
+            return False, "链接已变更"
+        memes = list(src.get("memes") or [])
+        if not memes:
+            return False, "无表情清单"
+        if not source_memes_present(target, memes):
+            return False, "本地表情缺失"
+        if not src.get("sha256"):
+            return False, "无 hash 记录"
+        # if local package exists, require hash match for confidence
+        local = self._resolve_local_package(source_id)
+        if local and local.is_file():
+            try:
+                sha = _sha256_file(local)
+                if sha and sha != str(src.get("sha256") or ""):
+                    return False, "本地包 hash 变化"
+            except Exception:
+                return False, "本地包校验失败"
+        return True, "hash 有效且表情在位"
+
+    def _resolve_local_package(self, source_id: str) -> Path | None:
+        """Prefer framework plugin_data packages/, then legacy cache paths."""
+        candidates: list[Path] = []
+        candidates.extend(package_candidates(source_id))
+        candidates.extend(
+            [
+                get_cache_dir() / f"{source_id}.zip",
+                get_cache_dir() / f"{source_id}.tar.gz",
+                get_cache_dir() / f"{source_id}.tgz",
+                get_plugin_root() / "data" / "cache" / f"{source_id}.zip",
+                get_plugin_root() / "data" / "cache" / f"{source_id}.tar.gz",
+            ]
+        )
+        if source_id == DEFAULT_SOURCE_ID:
+            candidates.extend(
+                [
+                    get_plugin_root() / "data" / "cache" / "default.zip",
+                    get_plugin_root() / "assets" / MEMES_ASSET_NAME,
+                ]
+            )
+        if source_id == "fonts":
+            candidates.extend(
+                [
+                    get_plugin_root() / "data" / "cache" / "fonts.zip",
+                    get_plugin_root() / "assets" / FONTS_ASSET_NAME,
+                ]
+            )
+
+        seen: set[str] = set()
+        for cand in candidates:
+            try:
+                if not cand or not cand.is_file():
+                    continue
+                key = str(cand.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                if cand.stat().st_size <= 1024:
+                    continue
+                if not is_supported_archive(cand):
+                    continue
+                return cand
+            except Exception:
+                continue
+        return None
+
+    async def _download_default_memes_zip(
+        self,
+        session: aiohttp.ClientSession,
+        tmp_dir: Path,
+        zip_path: Path,
+        progress_cb: Callable[[str], None] | None = None,
+    ) -> None:
+        def log(msg: str) -> None:
+            logger.info(msg)
+            if progress_cb:
+                progress_cb(msg)
+
+        bundled = get_plugin_root() / "assets" / "memes.zip"
+        if bundled.is_file():
+            shutil.copy2(bundled, zip_path)
+            log(f"使用插件内置压缩包: {bundled}")
+            return
+
+        try:
+            await _download_to_path(
+                session,
+                default_memes_urls(),
+                zip_path,
+                progress_cb=progress_cb,
+                timeout_sec=self.download_timeout,
+            )
+            if zip_path.is_file() and zip_path.stat().st_size > 1024:
+                log("已下载完整 memes.zip")
+                return
+        except Exception as exc:
+            log(f"完整 memes.zip 不可用，尝试分包下载: {exc}")
+
+        manifest_path = tmp_dir / MEMES_PARTS_MANIFEST
+        await _download_to_path(
+            session,
+            default_parts_manifest_urls(),
+            manifest_path,
+            progress_cb=progress_cb,
+            timeout_sec=self.download_timeout,
+        )
+        part_names = [
+            line.strip()
+            for line in manifest_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        if not part_names:
+            raise RuntimeError("memes.parts.txt 为空，无法组装表情资源包")
+
+        part_paths: list[Path] = []
+        for name in part_names:
+            part_path = tmp_dir / name
+            log(f"下载分包: {name}")
+            await _download_to_path(
+                session,
+                default_part_urls(name),
+                part_path,
+                progress_cb=progress_cb,
+                timeout_sec=self.download_timeout,
+            )
+            part_paths.append(part_path)
+
+        total = await asyncio.to_thread(_join_part_files, part_paths, zip_path)
+        log(f"分包合并完成: {total / 1024 / 1024:.1f} MB")
+
+    async def _acquire_package(
+        self,
+        *,
+        session: aiohttp.ClientSession,
+        source_id: str,
+        urls: list[str],
+        progress_cb: Callable[[str], None] | None = None,
+        force_download: bool = False,
+        downloader: Callable | None = None,
+    ) -> Path:
+        """Return local package path, downloading only when necessary."""
+
+        def log(msg: str) -> None:
+            logger.info(msg)
+            if progress_cb:
+                progress_cb(msg)
+
+        # choose package extension from first url (zip default for builtin downloader)
+        ext = ".zip"
+        if urls:
+            ext = package_ext_from_url(urls[0])
+        dest = get_package_path(source_id, ext)
+
+        if not force_download:
+            local = self._resolve_local_package(source_id)
+            if local and local.is_file():
+                log(f"使用本地资源包: {local}")
+                return local
+
+        # download / rebuild into packages/
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if downloader is not None:
+            tmp_dir = Path(
+                tempfile.mkdtemp(prefix=f"pkg_{source_id}_", dir=str(get_temp_dir()))
+            )
+            try:
+                tmp_zip = tmp_dir / f"{source_id}.zip"
+                await downloader(session, tmp_dir, tmp_zip, progress_cb)
+                if not tmp_zip.is_file() or tmp_zip.stat().st_size <= 1024:
+                    raise RuntimeError("资源包下载结果无效")
+                dest = get_package_path(source_id, ".zip")
+                shutil.copy2(tmp_zip, dest)
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+        else:
+            if not urls:
+                raise RuntimeError(f"资源源 {source_id} 无可用下载地址")
+            await _download_to_path(
+                session,
+                urls,
+                dest,
+                progress_cb=progress_cb,
+                timeout_sec=self.download_timeout,
+            )
+            # if server returned different format, rename by magic
+            if dest.is_file():
+                kind = detect_archive_format(dest)
+                if kind in {"tar.gz", "tgz"} and not str(dest).endswith((".tar.gz", ".tgz")):
+                    new_dest = get_package_path(source_id, ".tar.gz")
+                    try:
+                        if new_dest.exists():
+                            _safe_unlink(new_dest)
+                        dest.replace(new_dest)
+                        dest = new_dest
+                    except Exception:
+                        pass
+                elif kind == "zip" and dest.suffix.lower() != ".zip":
+                    new_dest = get_package_path(source_id, ".zip")
+                    try:
+                        if new_dest.exists():
+                            _safe_unlink(new_dest)
+                        dest.replace(new_dest)
+                        dest = new_dest
+                    except Exception:
+                        pass
+        if not dest.is_file():
+            raise RuntimeError(f"资源包不存在: {dest}")
+        if not is_supported_archive(dest):
+            msg = describe_unsupported_archive(dest) or f"不是有效的资源包: {dest}"
+            raise RuntimeError(msg)
+        log(f"资源包已就绪: {dest}（{detect_archive_format(dest)}）")
+        return dest
+
+    async def _install_source_from_zip(
+        self,
+        *,
+        index: dict[str, Any],
+        source_id: str,
+        name: str,
+        url: str,
+        zip_path: Path,
+        target: Path,
+        progress_cb: Callable[[str], None] | None = None,
     ) -> str:
         def log(msg: str) -> None:
             logger.info(msg)
             if progress_cb:
                 progress_cb(msg)
 
+        # normalize into packages/{source_id}.{zip|tar.gz}
+        src_path = Path(zip_path)
+        kind = detect_archive_format(src_path)
+        ext = ".tar.gz" if kind in {"tar.gz", "tgz"} else (".tar" if kind == "tar" else ".zip")
+        package_path = get_package_path(source_id, ext)
+        try:
+            if src_path.resolve() != package_path.resolve():
+                package_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_path, package_path)
+                zip_path = package_path
+            else:
+                zip_path = package_path
+        except Exception:
+            package_path = src_path
+            zip_path = src_path
+
+        sha = await asyncio.to_thread(_sha256_file, zip_path)
+        n, note, memes = await asyncio.to_thread(
+            install_memes_from_archive, zip_path, target
+        )
+        self._upsert_source(
+            index,
+            source_id=source_id,
+            name=name,
+            url=url,
+            sha256=sha,
+            memes=memes,
+            status="ok",
+            note=note,
+            file_count=n,
+            package_path=str(package_path),
+        )
+        log(
+            f"{name}: 写入 {n} 文件，表情 {len(memes)} 个；{note}；"
+            f"hash={sha[:12]}...；包={package_path}"
+        )
+        return f"{name}: 安装完成，表情 {len(memes)} 个，文件 {n}；"
+
+    async def _fix_memes_unlocked(
+        self,
+        progress_cb: Callable[[str], None] | None = None,
+        force: bool = False,
+    ) -> str:
+        def log(msg: str) -> None:
+            logger.info(msg)
+            if progress_cb:
+                progress_cb(msg)
+
+        # ensure data dirs / migration
+        data_dir = get_plugin_data_dir()
         target = get_memes_target_dir()
         if not target:
             return (
@@ -303,77 +1257,202 @@ class ResourceInstaller:
                 'pip install "meme_generator>=0.1.14,<0.2.0"'
             )
 
-        # 1) local dir
-        if self.local_memes_dir:
-            src = Path(self.local_memes_dir)
-            if src.is_dir():
-                log(f"从本地目录同步表情: {src}")
-                n = await asyncio.to_thread(_copy_tree_files, src, target)
-                return f"表情修复完成（本地目录）\n写入文件: {n}\n目标: {target}"
+        index = load_resource_index()
+        session = await self._get_session()
+        reports: list[str] = []
+        details: list[str] = []
+        installed = 0
+        skipped = 0
+        failed = 0
 
-        # 2) local zip
-        zip_path: Path | None = None
-        cleanup = False
-        try:
-            if self.local_memes_zip and Path(self.local_memes_zip).is_file():
-                zip_path = Path(self.local_memes_zip)
-                log(f"使用本地压缩包: {zip_path}")
-            else:
-                # bundled optional
-                bundled = get_plugin_root() / "assets" / "memes.zip"
-                if bundled.is_file():
-                    zip_path = bundled
-                    log(f"使用插件内置压缩包: {zip_path}")
-                else:
-                    channel = "Gitee" if source == "gitee" else "GitHub"
-                    log(f"开始从 {channel} 下载表情资源包 memes.zip ...")
-                    tmp_dir = Path(tempfile.mkdtemp(prefix="meme_assets_"))
-                    zip_path = tmp_dir / MEMES_ASSET_NAME
-                    cleanup = True
-                    session = await self._get_session()
-                    if source == "gitee":
-                        # Prefer single-file custom URL; otherwise assemble split parts
-                        # (Gitee release attachment limit is 100MB).
-                        if self.gitee_memes_url:
-                            await _download_to_path(
-                                session, [self.gitee_memes_url], zip_path, progress_cb=log
-                            )
-                        else:
-                            await self._download_gitee_memes_zip(
-                                session, tmp_dir, zip_path, progress_cb=log
-                            )
-                    else:
-                        urls = (
-                            [self.memes_url]
-                            if self.memes_url
-                            else _release_asset_urls(
-                                self.repo, self.release_tag, MEMES_ASSET_NAME
-                            )
-                        )
-                        await _download_to_path(session, urls, zip_path, progress_cb=log)
+        log(
+            f"数据目录: {data_dir}；下载超时: {self.download_timeout}s；"
+            f"模式: {'强制全量' if force else '增量'}"
+        )
 
-            channel_note = "（Gitee）" if source == "gitee" else ""
-            log(f"解压表情资源到: {target}")
-            n = await asyncio.to_thread(_safe_extract_zip, zip_path, target)
-            img_count = count_meme_image_files(target)
-            return (
-                f"表情修复完成{channel_note}\n"
-                f"解压文件: {n}\n"
-                f"图片文件数: {img_count}\n"
-                f"目标: {target}"
-            )
-        except Exception as exc:
-            logger.exception("表情修复失败")
-            return f"表情修复失败: {exc}"
-        finally:
-            if cleanup and zip_path:
-                try:
-                    shutil.rmtree(zip_path.parent, ignore_errors=True)
-                except Exception:
-                    pass
+        # 1) default source
+        default_url = f"builtin://{DEFAULT_SOURCE_ID}"
+        skip, reason = self._should_skip_source(
+            index, DEFAULT_SOURCE_ID, default_url, target, force
+        )
+        if skip:
+            skipped += 1
+            log(f"默认资源: 跳过（{reason}）")
+            reports.append("默认资源: 跳过")
+            details.append(f"默认资源: 跳过（{reason}）")
+            log(reports[-1])
+            # backfill package path / ensure index path migrated
+            src = (index.get("sources") or {}).get(DEFAULT_SOURCE_ID) or {}
+            local = self._resolve_local_package(DEFAULT_SOURCE_ID)
+            if local and not src.get("package_path"):
+                self._upsert_source(
+                    index,
+                    source_id=DEFAULT_SOURCE_ID,
+                    name=str(src.get("name") or "默认资源"),
+                    url=default_url,
+                    sha256=str(src.get("sha256") or ""),
+                    memes=list(src.get("memes") or []),
+                    status="ok",
+                    note=str(src.get("note") or reason),
+                    file_count=int(src.get("file_count") or 0),
+                    package_path=str(local),
+                )
+        else:
+            try:
+                log("处理默认表情资源包 ...")
+                zip_path = await self._acquire_package(
+                    session=session,
+                    source_id=DEFAULT_SOURCE_ID,
+                    urls=default_memes_urls(),
+                    progress_cb=log,
+                    force_download=force,
+                    downloader=self._download_default_memes_zip,
+                )
+                msg = await self._install_source_from_zip(
+                    index=index,
+                    source_id=DEFAULT_SOURCE_ID,
+                    name="默认资源",
+                    url=default_url,
+                    zip_path=zip_path,
+                    target=target,
+                    progress_cb=log,
+                )
+                reports.append(msg)
+                installed += 1
+            except Exception as exc:
+                failed += 1
+                logger.exception("默认资源安装失败")
+                log(f"默认资源: 失败: {exc}")
+                reports.append("默认资源: 失败")
+                details.append(f"默认资源: 失败: {exc}")
+                src = (index.get("sources") or {}).get(DEFAULT_SOURCE_ID) or {}
+                self._upsert_source(
+                    index,
+                    source_id=DEFAULT_SOURCE_ID,
+                    name="默认资源",
+                    url=default_url,
+                    sha256=str(src.get("sha256") or ""),
+                    memes=list(src.get("memes") or []),
+                    status="error",
+                    note=str(exc),
+                    package_path=str(get_package_zip_path(DEFAULT_SOURCE_ID)),
+                )
+
+        # 2) extra urls from config
+        for idx, url in enumerate(self.extra_meme_resource_urls, 1):
+            sid = _source_id_from_url(url)
+            name = f"额外资源{idx}"
+            skip, reason = self._should_skip_source(index, sid, url, target, force)
+            if skip:
+                skipped += 1
+                log(f"{name}: 跳过（{reason}）")
+                reports.append(f"{name}: 跳过")
+                details.append(f"{name}: 跳过（{reason}）")
+                log(reports[-1])
+                src = (index.get("sources") or {}).get(sid) or {}
+                local = self._resolve_local_package(sid)
+                if local and not src.get("package_path"):
+                    self._upsert_source(
+                        index,
+                        source_id=sid,
+                        name=str(src.get("name") or name),
+                        url=url,
+                        sha256=str(src.get("sha256") or ""),
+                        memes=list(src.get("memes") or []),
+                        status="ok",
+                        note=str(src.get("note") or reason),
+                        file_count=int(src.get("file_count") or 0),
+                        package_path=str(local),
+                    )
+                continue
+            try:
+                log(f"处理 {name}: {url}")
+                zip_path = await self._acquire_package(
+                    session=session,
+                    source_id=sid,
+                    urls=[url],
+                    progress_cb=log,
+                    force_download=force,
+                )
+                msg = await self._install_source_from_zip(
+                    index=index,
+                    source_id=sid,
+                    name=name,
+                    url=url,
+                    zip_path=zip_path,
+                    target=target,
+                    progress_cb=log,
+                )
+                reports.append(msg)
+                details.append(msg)
+                installed += 1
+            except Exception as exc:
+                failed += 1
+                logger.exception("额外资源安装失败: %s", url)
+                log(f"{name}: 失败: {exc}")
+                reports.append(f"{name}: 失败")
+                details.append(f"{name}: 失败: {exc}")
+                src = (index.get("sources") or {}).get(sid) or {}
+                pkg = self._resolve_local_package(sid)
+                sha = str(src.get("sha256") or "")
+                if pkg and pkg.is_file():
+                    try:
+                        sha = _sha256_file(pkg)
+                    except Exception:
+                        pass
+                note = str(exc)
+                # non-installable package: do not keep fake meme names
+                keep_memes = [] if ("未识别到可用的 meme 模块" in note or "没有可安装" in note) else list(src.get("memes") or [])
+                self._upsert_source(
+                    index,
+                    source_id=sid,
+                    name=name,
+                    url=url,
+                    sha256=sha,
+                    memes=keep_memes,
+                    status="error",
+                    note=note,
+                    package_path=str(pkg or get_package_zip_path(sid)),
+                )
+
+        save_resource_index(index)
+        img_count = count_meme_image_files(target)
+        total_memes = sorted(
+            {
+                m
+                for s in (index.get("sources") or {}).values()
+                if str(s.get("status") or "") == "ok"
+                for m in (s.get("memes") or [])
+            },
+            key=str.lower,
+        )
+        mode = "强制全量" if force else "增量"
+        user_msg = (
+            f"表情修复完成（{mode}）\n"
+            f"安装/更新: {installed}  跳过: {skipped}  失败: {failed}\n"
+            + "\n".join(reports)
+            + f"\n清单有效表情数: {len(total_memes)}\n"
+            f"图片文件数: {img_count}"
+        )
+        logger.info(
+            "表情修复详情（%s） 安装/更新=%s 跳过=%s 失败=%s 有效表情=%s 图片=%s\n"
+            "目标=%s\n数据目录=%s\n资源包目录=%s\n清单=%s\n明细:\n%s",
+            mode,
+            installed,
+            skipped,
+            failed,
+            len(total_memes),
+            img_count,
+            target,
+            data_dir,
+            get_packages_dir(),
+            get_resource_index_path(),
+            "\n".join(details) if details else ("\n".join(reports) if reports else "(无)"),
+        )
+        return user_msg
 
     async def _fix_fonts_unlocked(
-        self, progress_cb: Callable[[str], None] | None = None, source: str = "github"
+        self, progress_cb: Callable[[str], None] | None = None
     ) -> str:
         def log(msg: str) -> None:
             logger.info(msg)
@@ -383,54 +1462,18 @@ class ResourceInstaller:
         target = get_user_fonts_dir()
         target.mkdir(parents=True, exist_ok=True)
 
-        if self.local_fonts_dir:
-            src = Path(self.local_fonts_dir)
-            if src.is_dir():
-                log(f"从本地目录同步字体: {src}")
-                n = await asyncio.to_thread(_copy_tree_files, src, target)
-                cache_msg = await asyncio.to_thread(_refresh_font_cache)
-                extra = f"\n{cache_msg}" if cache_msg else "\n已刷新字体缓存"
-                return f"字体修复完成（本地目录）\n写入文件: {n}\n目标: {target}{extra}"
-
-        zip_path: Path | None = None
-        cleanup = False
         try:
-            if self.local_fonts_zip and Path(self.local_fonts_zip).is_file():
-                zip_path = Path(self.local_fonts_zip)
-                log(f"使用本地字体包: {zip_path}")
-            else:
-                bundled = get_plugin_root() / "assets" / "fonts.zip"
-                if bundled.is_file():
-                    zip_path = bundled
-                    log(f"使用插件内置字体包: {zip_path}")
-                else:
-                    channel = "Gitee" if source == "gitee" else "GitHub"
-                    log(f"开始从 {channel} 下载字体资源包 fonts.zip ...")
-                    tmp_dir = Path(tempfile.mkdtemp(prefix="meme_fonts_"))
-                    zip_path = tmp_dir / FONTS_ASSET_NAME
-                    cleanup = True
-                    if source == "gitee":
-                        urls = (
-                            [self.gitee_fonts_url]
-                            if self.gitee_fonts_url
-                            else _gitee_release_asset_urls(
-                                self.gitee_repo, self.gitee_release_tag, FONTS_ASSET_NAME
-                            )
-                        )
-                    else:
-                        urls = (
-                            [self.fonts_url]
-                            if self.fonts_url
-                            else _release_asset_urls(
-                                self.repo, self.release_tag, FONTS_ASSET_NAME
-                            )
-                        )
-                    session = await self._get_session()
-                    await _download_to_path(session, urls, zip_path, progress_cb=log)
+            session = await self._get_session()
+            log("处理默认字体资源包 ...")
+            zip_path = await self._acquire_package(
+                session=session,
+                source_id="fonts",
+                urls=default_fonts_urls(),
+                progress_cb=log,
+                force_download=False,
+            )
+            n = await asyncio.to_thread(install_fonts_from_zip, zip_path, target)
 
-            channel_note = "（Gitee）" if source == "gitee" else ""
-            log(f"安装字体到: {target}")
-            n = await asyncio.to_thread(_safe_extract_zip, zip_path, target)
             cache_msg = await asyncio.to_thread(_refresh_font_cache)
             font_count = count_installed_meme_fonts(target)
             extra = f"\n{cache_msg}" if cache_msg else "\n已刷新字体缓存（如适用）"
@@ -440,17 +1483,12 @@ class ResourceInstaller:
                     f"或重启 AstrBot。目录: {target}"
                 )
             return (
-                f"字体修复完成{channel_note}\n"
-                f"解压文件: {n}\n"
+                f"字体修复完成\n"
+                f"安装字体文件: {n}\n"
                 f"字体文件数: {font_count}\n"
+                f"资源包: {zip_path}\n"
                 f"目标: {target}{extra}"
             )
         except Exception as exc:
             logger.exception("字体修复失败")
             return f"字体修复失败: {exc}"
-        finally:
-            if cleanup and zip_path:
-                try:
-                    shutil.rmtree(zip_path.parent, ignore_errors=True)
-                except Exception:
-                    pass

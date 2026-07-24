@@ -140,6 +140,116 @@ class MemeManager:
                 keywords.add(meme.key)
         self.meme_keywords = keywords
 
+    @staticmethod
+    def _meme_sort_name(meme: Any) -> str:
+        key = str(getattr(meme, "key", "") or "")
+        if key:
+            return key
+        info = getattr(meme, "info", None)
+        if info is not None and hasattr(info, "keywords"):
+            kws = list(info.keywords or [])
+        else:
+            kws = list(getattr(meme, "keywords", []) or [])
+        return str(kws[0] if kws else "")
+
+    @classmethod
+    def _meme_sort_key(cls, meme: Any) -> tuple[int, str]:
+        """Sort: 0-9, then a-z, then other symbols."""
+        name = cls._meme_sort_name(meme).lower()
+        if not name:
+            cat = 3
+        elif name[0].isdigit():
+            cat = 0
+        elif "a" <= name[0] <= "z":
+            cat = 1
+        else:
+            cat = 2
+        return (cat, name)
+
+    def sorted_memes(self) -> list[Any]:
+        if not self._ensure_memes_loaded():
+            return []
+        return sorted(self.memes, key=self._meme_sort_key)
+
+    def reload_memes(self) -> str:
+        """Hot-reload meme modules from disk without restarting the framework.
+
+        meme_generator keeps an in-process registry (_memes). New folders under
+        site-packages/meme_generator/memes are not visible until reloaded.
+        """
+        if not MEME_GENERATOR_AVAILABLE:
+            return "meme_generator 不可用，无法热重载"
+
+        try:
+            import importlib
+            import sys
+            from pathlib import Path
+
+            import meme_generator
+            from meme_generator import load_meme, load_memes
+            from meme_generator.config import meme_config
+            import meme_generator.manager as meme_manager
+
+            before = {getattr(m, "key", None) for m in list(get_memes())}
+            before.discard(None)
+
+            importlib.invalidate_caches()
+
+            stale = [
+                name
+                for name in list(sys.modules)
+                if name == "meme_generator.memes"
+                or name.startswith("meme_generator.memes.")
+            ]
+            for name in stale:
+                sys.modules.pop(name, None)
+
+            if hasattr(meme_manager, "_memes") and isinstance(meme_manager._memes, dict):
+                meme_manager._memes.clear()
+
+            memes_root = Path(meme_generator.__file__).resolve().parent / "memes"
+            loaded = 0
+            if getattr(getattr(meme_config, "meme", None), "load_builtin_memes", True):
+                if memes_root.is_dir():
+                    for path in sorted(memes_root.iterdir(), key=lambda p: p.name.lower()):
+                        if not path.is_dir() or path.name.startswith("_"):
+                            continue
+                        try:
+                            load_meme(f"meme_generator.memes.{path.name}")
+                            loaded += 1
+                        except Exception as exc:
+                            logger.warning("热重载表情失败 %s: %s", path.name, exc)
+
+            extra_dirs = list(getattr(getattr(meme_config, "meme", None), "meme_dirs", []) or [])
+            for meme_dir in extra_dirs:
+                try:
+                    load_memes(meme_dir)
+                except Exception as exc:
+                    logger.warning("热重载扩展目录失败 %s: %s", meme_dir, exc)
+
+            self._load_memes()
+            after = {getattr(m, "key", None) for m in self.memes}
+            after.discard(None)
+            added = sorted(after - before)
+            removed = sorted(before - after)
+            msg = (
+                f"表情热重载完成：扫描 {loaded} 个目录，当前 {len(after)} 个"
+                f"（新增 {len(added)}，移除 {len(removed)}）"
+            )
+            if added:
+                preview = ", ".join(added[:50]) + ("..." if len(added) > 50 else "")
+                logger.info("热重载新增表情: %s", preview)
+            if removed:
+                preview = ", ".join(removed[:50]) + ("..." if len(removed) > 50 else "")
+                logger.info("热重载移除表情: %s", preview)
+            logger.info(msg)
+            return msg
+        except Exception as exc:
+            logger.exception("表情热重载失败")
+            self._load_memes()
+            return f"表情热重载失败，已回退普通加载: {exc}"
+
+
     def _ensure_memes_loaded(self) -> bool:
         if not self.memes:
             self._load_memes()
@@ -245,11 +355,15 @@ class MemeManager:
         return None
 
     async def render_meme_list_image(self) -> bytes | None:
-        if not self._ensure_memes_loaded() or not self.render_meme_list_func:
+        """Render meme list image sorted by name: 0-9, a-z, then symbols."""
+        memes = self.sorted_memes() if hasattr(self, "sorted_memes") else (
+            sorted(self.memes, key=self._meme_sort_key) if self._ensure_memes_loaded() else []
+        )
+        if not memes or not self.render_meme_list_func:
             return None
         try:
             if self.is_py_version:
-                meme_list = [(m, LegacyMemeProperties(labels=[])) for m in self.memes]
+                meme_list = [(m, LegacyMemeProperties(labels=[])) for m in memes]
                 rendered = self.render_meme_list_func(
                     meme_list=meme_list,  # type: ignore[arg-type]
                     text_template="{index}.{keywords}",
@@ -257,19 +371,23 @@ class MemeManager:
                 )
                 return self._unwrap_bytes(rendered, "render meme list")
 
-            meme_props = {m.key: self.MemePropertiesType() for m in self.memes}
-            rendered = await asyncio.to_thread(
-                self.render_meme_list_func,
+            meme_props = {m.key: self.MemePropertiesType() for m in memes}
+            kwargs = dict(
                 meme_properties=meme_props,
                 exclude_memes=[],
-                sort_by=self.MemeSortBy.KeywordsPinyin,
                 sort_reverse=False,
                 text_template="{index}. {keywords}",
                 add_category_icon=True,
             )
+            if self.MemeSortBy is not None:
+                for attr in ("Key", "Keywords", "KeywordsPinyin", "Default"):
+                    if hasattr(self.MemeSortBy, attr):
+                        kwargs["sort_by"] = getattr(self.MemeSortBy, attr)
+                        break
+            rendered = await asyncio.to_thread(self.render_meme_list_func, **kwargs)
             return self._unwrap_bytes(rendered, "render meme list")
         except Exception as e:
-            logger.error(f"生成meme列表图片失败: {e}")
+            logger.error(f"渲染meme列表图片失败: {e}")
             return None
 
     def get_meme_info(self, keyword: str) -> tuple[str, bytes] | None:
