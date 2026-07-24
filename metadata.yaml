@@ -1,7 +1,10 @@
 name: astrbot_plugin_memelite
 display_name: 表情包生成器
-desc: 表情包生成器，制作各种沙雕表情（本地部署，轻量化，支持命令修复资源）
-help: 发送 /meme检查 查看依赖；管理员发送 /meme表情修复 /meme字体修复 安装资源
-version: v3.2.0
+desc: 表情包生成器，制作各种沙雕表情（本地部署，轻量化，支持 GitHub/Gitee 命令修复资源）
+help: 发送 /meme检查 查看依赖；管理员发送 /meme表情修复 /meme字体修复（GitHub）或 /meme表情修复2 /meme字体修复2（Gitee）
+version: v3.2.1
 author: Qiscard
 repo: https://github.com/Qiscard/astrbot_plugin_memelite
+original_author: Zhalslar
+original_repo: https://github.com/Zhalslar/astrbot_plugin_memelite
+gitee_repo: https://gitee.com/qiscard/astrbot_plugin_memelite

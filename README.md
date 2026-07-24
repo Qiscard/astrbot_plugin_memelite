@@ -2,7 +2,9 @@
 
 # astrbot_plugin_memelite
 
-> 维护仓库：[Qiscard/astrbot_plugin_memelite](https://github.com/Qiscard/astrbot_plugin_memelite)
+> 维护仓库：[Qiscard/astrbot_plugin_memelite](https://github.com/Qiscard/astrbot_plugin_memelite)  
+> Gitee 镜像：[qiscard/astrbot_plugin_memelite](https://gitee.com/qiscard/astrbot_plugin_memelite)  
+> 原作者 / 上游：[Zhalslar/astrbot_plugin_memelite](https://github.com/Zhalslar/astrbot_plugin_memelite)
 
 _✨ [AstrBot](https://github.com/AstrBotDevs/AstrBot) 表情包制作插件 ✨_
 
@@ -16,9 +18,17 @@ _✨ [AstrBot](https://github.com/AstrBotDevs/AstrBot) 表情包制作插件 ✨
 - 对接本地 [meme-generator](https://github.com/MemeCrafters/meme-generator)（Python 0.1.x / Rust 0.2.x）。
 - **插件本体只含框架代码**，不附带大体量表情图片与字体。
 - 安装插件后，通过命令按需下载本仓库 Release 中的精简资源包：
-  - `/meme表情修复`
-  - `/meme字体修复`
+  - GitHub：`/meme表情修复`、`/meme字体修复`
+  - Gitee（国内镜像）：`/meme表情修复2`、`/meme字体修复2`
 - 启动时自动识别系统依赖；若缺少 OpenGL/EGL/fontconfig 等，会给出可直接复制的安装命令。
+
+## 致谢与声明
+
+本插件基于 [Zhalslar/astrbot_plugin_memelite](https://github.com/Zhalslar/astrbot_plugin_memelite) 继续维护与增强。  
+当前维护者：Qiscard  
+镜像仓库（Gitee）：https://gitee.com/qiscard/astrbot_plugin_memelite
+
+若你在使用本插件，也请对原作者 Zhalslar 的工作表示感谢。
 
 ## 安装
 
@@ -64,7 +74,7 @@ apt-get install -y libxrender1 libxcursor1 libxkbcommon0 libdbus-1-3
 sudo apt install -y libegl1-mesa libgles2-mesa libgl1-mesa-dev
 ```
 
-Windows 一般无需额外系统库；字体通过 `/meme字体修复` 安装到用户字体目录。
+Windows 一般无需额外系统库；字体通过 `/meme字体修复` 或 `/meme字体修复2` 安装到用户字体目录。
 
 ### 3. 下载表情与字体资源（安装后必须）
 
@@ -76,21 +86,32 @@ Windows 一般无需额外系统库；字体通过 `/meme字体修复` 安装到
 /meme字体修复
 ```
 
+国内网络访问 GitHub 困难时，改用 Gitee 镜像通道：
+
+```text
+/meme表情修复2
+/meme字体修复2
+```
+
 说明：
 
-| 命令 | 作用 | 默认落盘位置 |
-|------|------|----------------|
-| `/meme表情修复` | 下载 `memes.zip` 并解压 | `site-packages/meme_generator/memes/` |
-| `/meme字体修复` | 下载 `fonts.zip` 并安装 | Linux: `~/.local/share/fonts/meme-generator`<br>Windows: `%LOCALAPPDATA%\Microsoft\Windows\Fonts` |
-| `/meme检查` | 系统依赖 + 资源状态 | - |
+| 命令 | 作用 | 资源来源 | 默认落盘位置 |
+|------|------|----------|----------------|
+| `/meme表情修复` | 下载 `memes.zip` 并解压 | GitHub Release | `site-packages/meme_generator/memes/` |
+| `/meme字体修复` | 下载 `fonts.zip` 并安装 | GitHub Release | Linux: `~/.local/share/fonts/meme-generator`<br>Windows: `%LOCALAPPDATA%\Microsoft\Windows\Fonts` |
+| `/meme表情修复2` | 下载 `memes.zip` 并解压 | Gitee Release | 同上 |
+| `/meme字体修复2` | 下载 `fonts.zip` 并安装 | Gitee Release | 同上 |
+| `/meme检查` | 系统依赖 + 资源状态 | - | - |
 
-资源默认从 GitHub Release 标签 `assets-v1` 下载：
+资源默认标签均为 `assets-v1`：
 
-- `https://github.com/Qiscard/astrbot_plugin_memelite/releases/tag/assets-v1`
+- GitHub：`https://github.com/Qiscard/astrbot_plugin_memelite/releases/tag/assets-v1`
+- Gitee：`https://gitee.com/qiscard/astrbot_plugin_memelite/releases`
 
 也可在插件配置中填写：
 
-- `memes_url` / `fonts_url`：自定义直链
+- `memes_url` / `fonts_url`：GitHub 通道自定义直链
+- `gitee_memes_url` / `gitee_fonts_url`：Gitee 通道自定义直链
 - `local_memes_dir` / `local_fonts_dir`：本地已解压目录
 - `local_memes_zip` / `local_fonts_zip`：本地 zip 路径
 
@@ -107,9 +128,12 @@ AstrBot 面板：插件管理 -> astrbot_plugin_memelite -> 插件配置
 | `is_compress_image` | 压缩超过 512px 静态图 | `true` |
 | `is_check_resources` | 启动时官方在线资源检查（旧逻辑） | `false` |
 | `auto_fix_resources_on_start` | 启动时自动修复表情/字体 | `false` |
-| `resource_repo` | 资源仓库 | `Qiscard/astrbot_plugin_memelite` |
-| `resource_release_tag` | Release 标签 | `assets-v1` |
-| `memes_url` / `fonts_url` | 自定义下载直链 | `""` |
+| `resource_repo` | GitHub 资源仓库 | `Qiscard/astrbot_plugin_memelite` |
+| `resource_release_tag` | GitHub Release 标签 | `assets-v1` |
+| `gitee_resource_repo` | Gitee 资源仓库 | `qiscard/astrbot_plugin_memelite` |
+| `gitee_resource_release_tag` | Gitee Release 标签 | `assets-v1` |
+| `memes_url` / `fonts_url` | GitHub 通道自定义直链 | `""` |
+| `gitee_memes_url` / `gitee_fonts_url` | Gitee 通道自定义直链 | `""` |
 | `local_memes_dir` / `local_fonts_dir` | 本地目录优先 | `""` |
 | `local_memes_zip` / `local_fonts_zip` | 本地 zip 优先 | `""` |
 | `meme_timeout` | 生成超时（秒） | `15` |
@@ -126,8 +150,10 @@ AstrBot 面板：插件管理 -> astrbot_plugin_memelite -> 插件配置
 | `/meme帮助` | meme 列表图 | 普通 |
 | `/meme详情 xxx` | 查看参数 | 普通 |
 | `/meme检查` | 环境依赖与资源状态 | 普通 |
-| `/meme表情修复` | 下载/安装表情资源包 | 管理员 |
-| `/meme字体修复` | 下载/安装字体资源包 | 管理员 |
+| `/meme表情修复` | 从 GitHub 下载/安装表情资源包 | 管理员 |
+| `/meme字体修复` | 从 GitHub 下载/安装字体资源包 | 管理员 |
+| `/meme表情修复2` | 从 Gitee 下载/安装表情资源包 | 管理员 |
+| `/meme字体修复2` | 从 Gitee 下载/安装字体资源包 | 管理员 |
 | `禁用meme xxx` / `启用meme xxx` | 黑名单 | 管理员 |
 | `meme黑名单` | 查看禁用列表 | 管理员 |
 | `添加保护` / `移除保护` / `保护名单` | 保护名单 | 管理员 |
@@ -141,7 +167,7 @@ AstrBot 面板：插件管理 -> astrbot_plugin_memelite -> 插件配置
 
 ## 维护资源包
 
-本仓库 Release `assets-v1` 应包含：
+GitHub / Gitee 的 Release `assets-v1` 均应包含：
 
 - `memes.zip`：表情图片资源（解压到 `meme_generator/memes`）
 - `fonts.zip`：字体文件（安装到用户字体目录）
@@ -153,7 +179,7 @@ python _pack_assets.py
 # 输出: assets/dist/memes.zip  assets/dist/fonts.zip
 ```
 
-上传到 Release：
+上传到 GitHub Release：
 
 ```bash
 gh release create assets-v1 assets/dist/memes.zip assets/dist/fonts.zip \
@@ -161,15 +187,21 @@ gh release create assets-v1 assets/dist/memes.zip assets/dist/fonts.zip \
   --notes "精简表情与字体资源包，供 /meme表情修复 与 /meme字体修复 使用"
 ```
 
+上传到 Gitee Release 后，即可使用 `/meme表情修复2` 与 `/meme字体修复2`。
+
 ## 注意事项
 
-1. **装插件 ≠ 立即可用**：还需系统依赖 + `/meme表情修复` + `/meme字体修复`。
-2. 重建 AstrBot 虚拟环境后，`site-packages` 内表情会丢失，需重新执行 `/meme表情修复`。
-3. 中文乱码/缺字：执行 `/meme字体修复`；Linux 建议再装 `fonts-noto-cjk`。
-4. Docker 请把系统依赖写入镜像或启动脚本，避免每次容器重建后重复踩坑。
+1. **装插件 ≠ 立即可用**：还需系统依赖 + 表情/字体资源修复命令。
+2. GitHub 访问不畅时优先用 `/meme表情修复2` + `/meme字体修复2`。
+3. 重建 AstrBot 虚拟环境后，`site-packages` 内表情会丢失，需重新执行修复命令。
+4. 中文乱码/缺字：执行字体修复；Linux 建议再装 `fonts-noto-cjk`。
+5. Docker 请把系统依赖写入镜像或启动脚本，避免每次容器重建后重复踩坑。
 
 ## 相关链接
 
+- 原作者仓库：[Zhalslar/astrbot_plugin_memelite](https://github.com/Zhalslar/astrbot_plugin_memelite)
+- 本仓库 GitHub：[Qiscard/astrbot_plugin_memelite](https://github.com/Qiscard/astrbot_plugin_memelite)
+- 本仓库 Gitee：[qiscard/astrbot_plugin_memelite](https://gitee.com/qiscard/astrbot_plugin_memelite)
 - [meme-generator](https://github.com/MemeCrafters/meme-generator)
 - [meme-generator-rs](https://github.com/MemeCrafters/meme-generator-rs)
 - [AstrBot](https://astrbot.app/)

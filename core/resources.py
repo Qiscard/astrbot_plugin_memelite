@@ -21,6 +21,7 @@ except Exception:  # pragma: no cover - offline tooling
 
 DEFAULT_RELEASE_TAG = "assets-v1"
 DEFAULT_REPO = "Qiscard/astrbot_plugin_memelite"
+DEFAULT_GITEE_REPO = "qiscard/astrbot_plugin_memelite"
 
 # GitHub release asset names
 MEMES_ASSET_NAME = "memes.zip"
@@ -79,6 +80,13 @@ def _release_asset_urls(repo: str, tag: str, filename: str) -> list[str]:
         f"https://mirror.ghproxy.com/{base}",
         f"https://ghproxy.net/{base}",
         f"https://gitdl.cn/{base}",
+    ]
+
+
+def _gitee_release_asset_urls(repo: str, tag: str, filename: str) -> list[str]:
+    """Gitee release asset download URLs for domestic mirror channel."""
+    return [
+        f"https://gitee.com/{repo}/releases/download/{tag}/{filename}",
     ]
 
 
@@ -186,6 +194,10 @@ class ResourceInstaller:
         self,
         repo: str = DEFAULT_REPO,
         release_tag: str = DEFAULT_RELEASE_TAG,
+        gitee_repo: str = DEFAULT_GITEE_REPO,
+        gitee_release_tag: str = DEFAULT_RELEASE_TAG,
+        gitee_memes_url: str = "",
+        gitee_fonts_url: str = "",
         memes_url: str = "",
         fonts_url: str = "",
         local_memes_dir: str = "",
@@ -195,6 +207,10 @@ class ResourceInstaller:
     ):
         self.repo = repo or DEFAULT_REPO
         self.release_tag = release_tag or DEFAULT_RELEASE_TAG
+        self.gitee_repo = gitee_repo or DEFAULT_GITEE_REPO
+        self.gitee_release_tag = gitee_release_tag or DEFAULT_RELEASE_TAG
+        self.gitee_memes_url = (gitee_memes_url or "").strip()
+        self.gitee_fonts_url = (gitee_fonts_url or "").strip()
         self.memes_url = (memes_url or "").strip()
         self.fonts_url = (fonts_url or "").strip()
         self.local_memes_dir = (local_memes_dir or "").strip()
@@ -229,24 +245,36 @@ class ResourceInstaller:
             f"- 字体安装目录: {fonts_dir}",
             f"- 字体文件数: {font_count}",
             f"- 资源版本标签: {self.release_tag}",
-            f"- 资源仓库: {self.repo}",
+            f"- 资源仓库(GitHub): {self.repo}",
+            f"- Gitee 资源仓库: {self.gitee_repo}",
+            f"- Gitee 资源标签: {self.gitee_release_tag}",
         ]
         if img_count < 50:
-            lines.append("- 表情资源可能未完整安装，请执行 /meme表情修复")
+            lines.append("- 表情资源可能未完整安装，请执行 /meme表情修复 或 /meme表情修复2(Gitee)")
         if font_count < 3:
-            lines.append("- 字体可能未安装，请执行 /meme字体修复")
+            lines.append("- 字体可能未安装，请执行 /meme字体修复 或 /meme字体修复2(Gitee)")
         return "\n".join(lines)
 
     async def fix_memes(self, progress_cb: Callable[[str], None] | None = None) -> str:
         async with self._memes_lock:
-            return await self._fix_memes_unlocked(progress_cb)
+            return await self._fix_memes_unlocked(progress_cb, source="github")
 
     async def fix_fonts(self, progress_cb: Callable[[str], None] | None = None) -> str:
         async with self._fonts_lock:
-            return await self._fix_fonts_unlocked(progress_cb)
+            return await self._fix_fonts_unlocked(progress_cb, source="github")
+
+    async def fix_memes_gitee(self, progress_cb: Callable[[str], None] | None = None) -> str:
+        """Install meme images from Gitee Release (domestic channel)."""
+        async with self._memes_lock:
+            return await self._fix_memes_unlocked(progress_cb, source="gitee")
+
+    async def fix_fonts_gitee(self, progress_cb: Callable[[str], None] | None = None) -> str:
+        """Install fonts from Gitee Release (domestic channel)."""
+        async with self._fonts_lock:
+            return await self._fix_fonts_unlocked(progress_cb, source="gitee")
 
     async def _fix_memes_unlocked(
-        self, progress_cb: Callable[[str], None] | None = None
+        self, progress_cb: Callable[[str], None] | None = None, source: str = "github"
     ) -> str:
         def log(msg: str) -> None:
             logger.info(msg)
@@ -282,23 +310,36 @@ class ResourceInstaller:
                     zip_path = bundled
                     log(f"使用插件内置压缩包: {zip_path}")
                 else:
-                    log("开始下载表情资源包 memes.zip ...")
+                    channel = "Gitee" if source == "gitee" else "GitHub"
+                    log(f"开始从 {channel} 下载表情资源包 memes.zip ...")
                     tmp_dir = Path(tempfile.mkdtemp(prefix="meme_assets_"))
                     zip_path = tmp_dir / MEMES_ASSET_NAME
                     cleanup = True
-                    urls = (
-                        [self.memes_url]
-                        if self.memes_url
-                        else _release_asset_urls(self.repo, self.release_tag, MEMES_ASSET_NAME)
-                    )
+                    if source == "gitee":
+                        urls = (
+                            [self.gitee_memes_url]
+                            if self.gitee_memes_url
+                            else _gitee_release_asset_urls(
+                                self.gitee_repo, self.gitee_release_tag, MEMES_ASSET_NAME
+                            )
+                        )
+                    else:
+                        urls = (
+                            [self.memes_url]
+                            if self.memes_url
+                            else _release_asset_urls(
+                                self.repo, self.release_tag, MEMES_ASSET_NAME
+                            )
+                        )
                     session = await self._get_session()
                     await _download_to_path(session, urls, zip_path, progress_cb=log)
 
+            channel_note = "（Gitee）" if source == "gitee" else ""
             log(f"解压表情资源到: {target}")
             n = await asyncio.to_thread(_safe_extract_zip, zip_path, target)
             img_count = count_meme_image_files(target)
             return (
-                f"表情修复完成\n"
+                f"表情修复完成{channel_note}\n"
                 f"解压文件: {n}\n"
                 f"图片文件数: {img_count}\n"
                 f"目标: {target}"
@@ -314,7 +355,7 @@ class ResourceInstaller:
                     pass
 
     async def _fix_fonts_unlocked(
-        self, progress_cb: Callable[[str], None] | None = None
+        self, progress_cb: Callable[[str], None] | None = None, source: str = "github"
     ) -> str:
         def log(msg: str) -> None:
             logger.info(msg)
@@ -345,18 +386,31 @@ class ResourceInstaller:
                     zip_path = bundled
                     log(f"使用插件内置字体包: {zip_path}")
                 else:
-                    log("开始下载字体资源包 fonts.zip ...")
+                    channel = "Gitee" if source == "gitee" else "GitHub"
+                    log(f"开始从 {channel} 下载字体资源包 fonts.zip ...")
                     tmp_dir = Path(tempfile.mkdtemp(prefix="meme_fonts_"))
                     zip_path = tmp_dir / FONTS_ASSET_NAME
                     cleanup = True
-                    urls = (
-                        [self.fonts_url]
-                        if self.fonts_url
-                        else _release_asset_urls(self.repo, self.release_tag, FONTS_ASSET_NAME)
-                    )
+                    if source == "gitee":
+                        urls = (
+                            [self.gitee_fonts_url]
+                            if self.gitee_fonts_url
+                            else _gitee_release_asset_urls(
+                                self.gitee_repo, self.gitee_release_tag, FONTS_ASSET_NAME
+                            )
+                        )
+                    else:
+                        urls = (
+                            [self.fonts_url]
+                            if self.fonts_url
+                            else _release_asset_urls(
+                                self.repo, self.release_tag, FONTS_ASSET_NAME
+                            )
+                        )
                     session = await self._get_session()
                     await _download_to_path(session, urls, zip_path, progress_cb=log)
 
+            channel_note = "（Gitee）" if source == "gitee" else ""
             log(f"安装字体到: {target}")
             n = await asyncio.to_thread(_safe_extract_zip, zip_path, target)
             cache_msg = await asyncio.to_thread(_refresh_font_cache)
@@ -368,7 +422,7 @@ class ResourceInstaller:
                     f"或重启 AstrBot。目录: {target}"
                 )
             return (
-                f"字体修复完成\n"
+                f"字体修复完成{channel_note}\n"
                 f"解压文件: {n}\n"
                 f"字体文件数: {font_count}\n"
                 f"目标: {target}{extra}"

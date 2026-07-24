@@ -32,7 +32,7 @@
     "resource_repo": {
         "description": "资源包仓库",
         "type": "string",
-        "hint": "GitHub 仓库 owner/name，用于下载 Release 资源",
+        "hint": "GitHub 仓库 owner/name，用于 /meme表情修复 与 /meme字体修复 下载 Release 资源",
         "default": "Qiscard/astrbot_plugin_memelite"
     },
     "resource_release_tag": {
@@ -40,6 +40,30 @@
         "type": "string",
         "hint": "Release tag，例如 assets-v1",
         "default": "assets-v1"
+    },
+    "gitee_resource_repo": {
+        "description": "Gitee 资源包仓库",
+        "type": "string",
+        "hint": "Gitee 仓库 owner/name，供 /meme表情修复2 与 /meme字体修复2 使用",
+        "default": "qiscard/astrbot_plugin_memelite"
+    },
+    "gitee_resource_release_tag": {
+        "description": "Gitee 资源包 Release 标签",
+        "type": "string",
+        "hint": "Gitee Release tag，例如 assets-v1",
+        "default": "assets-v1"
+    },
+    "gitee_memes_url": {
+        "description": "Gitee 表情包直链(可选)",
+        "type": "string",
+        "hint": "填写后 /meme表情修复2 优先使用该 URL 下载 memes.zip",
+        "default": ""
+    },
+    "gitee_fonts_url": {
+        "description": "Gitee 字体包直链(可选)",
+        "type": "string",
+        "hint": "填写后 /meme字体修复2 优先使用该 URL 下载 fonts.zip",
+        "default": ""
     },
     "memes_url": {
         "description": "表情包直链(可选)",

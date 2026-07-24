@@ -26,6 +26,10 @@ class MemePlugin(Star):
         self.resources = ResourceInstaller(
             repo=str(config.get("resource_repo") or "Qiscard/astrbot_plugin_memelite"),
             release_tag=str(config.get("resource_release_tag") or "assets-v1"),
+            gitee_repo=str(config.get("gitee_resource_repo") or "qiscard/astrbot_plugin_memelite"),
+            gitee_release_tag=str(config.get("gitee_resource_release_tag") or "assets-v1"),
+            gitee_memes_url=str(config.get("gitee_memes_url") or ""),
+            gitee_fonts_url=str(config.get("gitee_fonts_url") or ""),
             memes_url=str(config.get("memes_url") or ""),
             fonts_url=str(config.get("fonts_url") or ""),
             local_memes_dir=str(config.get("local_memes_dir") or ""),
@@ -134,14 +138,16 @@ class MemePlugin(Star):
         if self._env_ok:
             parts.append("")
             parts.append("资源修复命令：")
-            parts.append("- /meme表情修复")
-            parts.append("- /meme字体修复")
+            parts.append("- /meme表情修复  (GitHub)")
+            parts.append("- /meme字体修复  (GitHub)")
+            parts.append("- /meme表情修复2 (Gitee 国内镜像)")
+            parts.append("- /meme字体修复2 (Gitee 国内镜像)")
         yield event.plain_result("\n".join(parts))
 
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("meme表情修复", alias={"表情修复", "meme下载表情", "meme资源修复"})
     async def meme_fix_images(self, event: AstrMessageEvent):
-        """下载/解压表情资源包到 meme_generator/memes"""
+        """下载/解压表情资源包到 meme_generator/memes（GitHub）"""
         if not self._env_ok:
             # still allow install of assets, but warn
             yield event.plain_result(
@@ -150,7 +156,7 @@ class MemePlugin(Star):
                 + "\n\n开始表情修复..."
             )
         else:
-            yield event.plain_result("开始表情修复，请稍候...")
+            yield event.plain_result("开始表情修复（GitHub），请稍候...")
 
         result = await self.resources.fix_memes()
         # reload meme list after install
@@ -160,9 +166,34 @@ class MemePlugin(Star):
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("meme字体修复", alias={"字体修复", "meme下载字体", "meme安装字体"})
     async def meme_fix_fonts(self, event: AstrMessageEvent):
-        """下载/安装表情字体到用户字体目录"""
-        yield event.plain_result("开始字体修复，请稍候...")
+        """下载/安装表情字体到用户字体目录（GitHub）"""
+        yield event.plain_result("开始字体修复（GitHub），请稍候...")
         result = await self.resources.fix_fonts()
+        yield event.plain_result(result)
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("meme表情修复2", alias={"表情修复2", "meme下载表情2", "meme资源修复2", "meme表情修复gitee"})
+    async def meme_fix_images_gitee(self, event: AstrMessageEvent):
+        """从 Gitee 下载/解压表情资源包到 meme_generator/memes"""
+        if not self._env_ok:
+            yield event.plain_result(
+                "警告：系统依赖检查未通过，先尝试从 Gitee 修复表情资源。\n"
+                + self._env_report.format_message()
+                + "\n\n开始表情修复（Gitee）..."
+            )
+        else:
+            yield event.plain_result("开始表情修复（Gitee 国内镜像），请稍候...")
+
+        result = await self.resources.fix_memes_gitee()
+        self.manager._load_memes()
+        yield event.plain_result(result)
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("meme字体修复2", alias={"字体修复2", "meme下载字体2", "meme安装字体2", "meme字体修复gitee"})
+    async def meme_fix_fonts_gitee(self, event: AstrMessageEvent):
+        """从 Gitee 下载/安装表情字体到用户字体目录"""
+        yield event.plain_result("开始字体修复（Gitee 国内镜像），请稍候...")
+        result = await self.resources.fix_fonts_gitee()
         yield event.plain_result(result)
 
     @filter.permission_type(PermissionType.ADMIN)
