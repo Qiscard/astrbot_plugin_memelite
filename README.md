@@ -189,6 +189,12 @@ gh release create assets-v1 assets/dist/memes.zip assets/dist/fonts.zip \
 
 上传到 Gitee Release 后，即可使用 `/meme表情修复2` 与 `/meme字体修复2`。
 
+> Gitee 附件单文件限制 100MB。`fonts.zip` 可直接上传；`memes.zip` 需拆分为：
+> - `memes.parts.txt`（分包清单）
+> - `memes.zip.part01`、`memes.zip.part02`...
+>
+> `/meme表情修复2` 会自动下载分包并合并为完整 `memes.zip` 再解压。
+
 ## 注意事项
 
 1. **装插件 ≠ 立即可用**：还需系统依赖 + 表情/字体资源修复命令。

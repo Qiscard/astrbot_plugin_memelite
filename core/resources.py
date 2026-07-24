@@ -26,6 +26,7 @@ DEFAULT_GITEE_REPO = "qiscard/astrbot_plugin_memelite"
 # GitHub release asset names
 MEMES_ASSET_NAME = "memes.zip"
 FONTS_ASSET_NAME = "fonts.zip"
+MEMES_PARTS_MANIFEST = "memes.parts.txt"
 
 
 def get_plugin_root() -> Path:
@@ -88,6 +89,20 @@ def _gitee_release_asset_urls(repo: str, tag: str, filename: str) -> list[str]:
     return [
         f"https://gitee.com/{repo}/releases/download/{tag}/{filename}",
     ]
+
+
+def _join_part_files(part_paths: list[Path], dest: Path) -> int:
+    """Concatenate split zip parts into dest. Returns total bytes written."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    total = 0
+    tmp = dest.with_suffix(dest.suffix + ".joining")
+    with tmp.open("wb") as out:
+        for part in part_paths:
+            data = part.read_bytes()
+            out.write(data)
+            total += len(data)
+    tmp.replace(dest)
+    return total
 
 
 async def _download_to_path(
@@ -315,14 +330,18 @@ class ResourceInstaller:
                     tmp_dir = Path(tempfile.mkdtemp(prefix="meme_assets_"))
                     zip_path = tmp_dir / MEMES_ASSET_NAME
                     cleanup = True
+                    session = await self._get_session()
                     if source == "gitee":
-                        urls = (
-                            [self.gitee_memes_url]
-                            if self.gitee_memes_url
-                            else _gitee_release_asset_urls(
-                                self.gitee_repo, self.gitee_release_tag, MEMES_ASSET_NAME
+                        # Prefer single-file custom URL; otherwise assemble split parts
+                        # (Gitee release attachment limit is 100MB).
+                        if self.gitee_memes_url:
+                            await _download_to_path(
+                                session, [self.gitee_memes_url], zip_path, progress_cb=log
                             )
-                        )
+                        else:
+                            await self._download_gitee_memes_zip(
+                                session, tmp_dir, zip_path, progress_cb=log
+                            )
                     else:
                         urls = (
                             [self.memes_url]
@@ -331,8 +350,7 @@ class ResourceInstaller:
                                 self.repo, self.release_tag, MEMES_ASSET_NAME
                             )
                         )
-                    session = await self._get_session()
-                    await _download_to_path(session, urls, zip_path, progress_cb=log)
+                        await _download_to_path(session, urls, zip_path, progress_cb=log)
 
             channel_note = "（Gitee）" if source == "gitee" else ""
             log(f"解压表情资源到: {target}")
