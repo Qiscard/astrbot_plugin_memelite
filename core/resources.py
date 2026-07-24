@@ -38,7 +38,7 @@ PLUGIN_DATA_NAME = "astrbot_plugin_memelite"
 DEFAULT_DOWNLOAD_TIMEOUT = 180
 
 # Align with AstrBot dashboard ProxySelector + common fallbacks.
-# Format used by AstrBot: {proxy}/{https://github.com/...}
+# Format: {proxy}/{https://github.com/...}
 ASTRBOT_GITHUB_PROXIES = [
     "https://edgeone.gh-proxy.com",
     "https://hk.gh-proxy.com",
@@ -53,7 +53,7 @@ LEGACY_GITHUB_PROXIES = [
 GITHUB_PROXY_PROBE_PATH = (
     "https://github.com/AstrBotDevs/AstrBot/raw/refs/heads/master/.python-version"
 )
-GITHUB_PROXY_CACHE_TTL = 12 * 3600  # seconds
+GITHUB_PROXY_CACHE_TTL = 12 * 3600
 GITHUB_PROXY_PROBE_TIMEOUT = 8
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
@@ -202,7 +202,12 @@ def is_github_url(url: str) -> bool:
         host = (urlparse(url).netloc or "").lower()
     except Exception:
         return False
-    return host in {"github.com", "www.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com"}
+    return host in {
+        "github.com",
+        "www.github.com",
+        "raw.githubusercontent.com",
+        "objects.githubusercontent.com",
+    }
 
 
 def normalize_github_proxy(proxy: str | None) -> str:
@@ -215,13 +220,11 @@ def normalize_github_proxy(proxy: str | None) -> str:
 
 
 def apply_github_proxy(url: str, proxy: str | None) -> str:
-    """Wrap a GitHub URL with AstrBot-style proxy prefix."""
     proxy = normalize_github_proxy(proxy)
     if not proxy or not url:
         return url
     if url.startswith(proxy + "/"):
         return url
-    # already proxied by another known prefix
     return f"{proxy}/{url}"
 
 
@@ -232,16 +235,17 @@ def get_github_proxy_cache_path() -> Path:
 def load_github_proxy_rank() -> dict[str, Any]:
     path = get_github_proxy_cache_path()
     if not path.is_file():
-        return {"updated_at": 0, "proxies": []}
+        return {"updated_at": 0, "proxies": [], "selected": ""}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
-            return {"updated_at": 0, "proxies": []}
+            return {"updated_at": 0, "proxies": [], "selected": ""}
         data.setdefault("updated_at", 0)
         data.setdefault("proxies", [])
+        data.setdefault("selected", "")
         return data
     except Exception:
-        return {"updated_at": 0, "proxies": []}
+        return {"updated_at": 0, "proxies": [], "selected": ""}
 
 
 def save_github_proxy_rank(rank: dict[str, Any]) -> None:
@@ -252,15 +256,31 @@ def save_github_proxy_rank(rank: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def get_selected_github_proxy() -> str:
+    cache = load_github_proxy_rank()
+    selected = normalize_github_proxy(str(cache.get("selected") or ""))
+    if selected:
+        return selected
+    for item in cache.get("proxies") or []:
+        if item.get("available") and item.get("proxy"):
+            return normalize_github_proxy(str(item.get("proxy")))
+    return ""
+
+
+def set_selected_github_proxy(proxy: str) -> None:
+    cache = load_github_proxy_rank()
+    cache["selected"] = normalize_github_proxy(proxy)
+    cache.setdefault("proxies", cache.get("proxies") or [])
+    cache["updated_at"] = int(cache.get("updated_at") or time.time())
+    save_github_proxy_rank(cache)
+
+
 async def probe_github_proxy_latency(
     session: aiohttp.ClientSession,
     proxy: str,
     timeout_sec: float = GITHUB_PROXY_PROBE_TIMEOUT,
 ) -> float | None:
-    """Return latency ms if proxy can fetch AstrBot probe file, else None.
-
-    Uses the same probe target as AstrBot dashboard /stats/ghproxy/test.
-    """
+    """Same probe target as AstrBot /stats/ghproxy/test."""
     proxy = normalize_github_proxy(proxy)
     if not proxy:
         return None
@@ -284,15 +304,16 @@ async def rank_github_proxies(
     proxies: list[str] | None = None,
     progress_cb: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
-    proxies = [normalize_github_proxy(p) for p in (proxies or (ASTRBOT_GITHUB_PROXIES + LEGACY_GITHUB_PROXIES))]
-    # de-dup keep order
+    proxies = [
+        normalize_github_proxy(p)
+        for p in (proxies or (ASTRBOT_GITHUB_PROXIES + LEGACY_GITHUB_PROXIES))
+    ]
     seen: set[str] = set()
     uniq: list[str] = []
     for p in proxies:
         if p and p not in seen:
             seen.add(p)
             uniq.append(p)
-
     if progress_cb:
         progress_cb(f"开始 GitHub 代理测速，共 {len(uniq)} 个源 ...")
 
@@ -301,13 +322,16 @@ async def rank_github_proxies(
         return {
             "proxy": proxy,
             "available": latency is not None,
-            "latency": latency if latency is not None else None,
+            "latency": latency,
         }
 
-    results = await asyncio.gather(*[one(p) for p in uniq])
+    results = list(await asyncio.gather(*[one(p) for p in uniq]))
     ranked = sorted(
         results,
-        key=lambda x: (0 if x.get("available") else 1, x.get("latency") if x.get("latency") is not None else 1e12),
+        key=lambda x: (
+            0 if x.get("available") else 1,
+            x.get("latency") if x.get("latency") is not None else 1e12,
+        ),
     )
     if progress_cb:
         for item in ranked:
@@ -315,29 +339,17 @@ async def rank_github_proxies(
                 progress_cb(f"代理可用: {item['proxy']}  延迟 {item['latency']} ms")
             else:
                 progress_cb(f"代理不可用: {item['proxy']}")
-    save_github_proxy_rank({"updated_at": int(time.time()), "proxies": ranked})
+    save_github_proxy_rank(
+        {
+            "updated_at": int(time.time()),
+            "proxies": ranked,
+            "selected": next(
+                (str(x["proxy"]) for x in ranked if x.get("available")),
+                "",
+            ),
+        }
+    )
     return ranked
-
-
-def get_selected_github_proxy() -> str:
-    """Auto-selected best proxy from last probe (not panel custom)."""
-    cache = load_github_proxy_rank()
-    selected = normalize_github_proxy(str(cache.get("selected") or ""))
-    if selected:
-        return selected
-    for item in cache.get("proxies") or []:
-        if item.get("available") and item.get("proxy"):
-            return normalize_github_proxy(str(item.get("proxy")))
-    return ""
-
-
-def set_selected_github_proxy(proxy: str) -> None:
-    cache = load_github_proxy_rank()
-    cache["selected"] = normalize_github_proxy(proxy)
-    cache["updated_at"] = int(cache.get("updated_at") or time.time())
-    # keep proxies list if present
-    cache.setdefault("proxies", cache.get("proxies") or [])
-    save_github_proxy_rank(cache)
 
 
 def expand_urls_with_github_proxies(
@@ -348,19 +360,11 @@ def expand_urls_with_github_proxies(
     use_proxy: bool = True,
     force_proxy: bool = True,
 ) -> list[str]:
-    """Expand download candidates.
-
-    - Non-GitHub (e.g. Gitee): unchanged, never proxied.
-    - GitHub + use_proxy: go through proxy only when force_proxy (default).
-      Order: fixed_proxy (config) > selected best > ranked list.
-      Direct github.com is omitted while force_proxy is on.
-    - GitHub + use_proxy off: direct only.
-    """
+    """Gitee unchanged. GitHub forced through proxy when use_proxy/force_proxy on."""
     if not urls:
         return []
     fixed_proxy = normalize_github_proxy(fixed_proxy)
     selected = get_selected_github_proxy()
-
     if ranked_proxies is None:
         cache = load_github_proxy_rank()
         ranked_proxies = [
@@ -387,8 +391,6 @@ def expand_urls_with_github_proxies(
         if not use_proxy:
             add(url)
             continue
-
-        # force GitHub via proxy
         preferred: list[str] = []
         if fixed_proxy:
             preferred.append(fixed_proxy)
@@ -397,17 +399,537 @@ def expand_urls_with_github_proxies(
         for p in ranked_proxies:
             if p and p not in preferred:
                 preferred.append(p)
-
         for proxy in preferred:
             add(apply_github_proxy(url, proxy))
-
-        # only allow direct GitHub when force_proxy is disabled
-        if not force_proxy:
-            add(url)
-        elif not preferred:
-            # no proxy available at all: last resort direct + caller should log
+        if not force_proxy or not preferred:
             add(url)
     return out
+
+
+def get_meme_package_dir() -> Path | None:
+    try:
+        import meme_generator
+
+        return Path(meme_generator.__file__).resolve().parent
+    except Exception:
+        return None
+
+
+def get_memes_target_dir() -> Path | None:
+    pkg = get_meme_package_dir()
+    return (pkg / "memes") if pkg else None
+
+
+def get_user_fonts_dir() -> Path:
+    if sys.platform.startswith("win"):
+        local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(local) / "Microsoft" / "Windows" / "Fonts"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Fonts"
+    return Path.home() / ".local" / "share" / "fonts" / "meme-generator"
+
+
+def count_meme_image_files(memes_dir: Path | None) -> int:
+    if not memes_dir or not memes_dir.is_dir():
+        return 0
+    return sum(
+        1
+        for p in memes_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+    )
+
+
+def count_installed_meme_fonts(fonts_dir: Path | None = None) -> int:
+    fonts_dir = fonts_dir or get_user_fonts_dir()
+    if not fonts_dir.is_dir():
+        return 0
+    return sum(
+        1 for p in fonts_dir.iterdir() if p.is_file() and p.suffix.lower() in FONT_EXTS
+    )
+
+
+def _github_urls(filename: str) -> list[str]:
+    """Raw GitHub release URL; proxies applied via expand_urls_with_github_proxies."""
+    return [
+        f"https://github.com/{DEFAULT_GITHUB_REPO}/releases/download/"
+        f"{DEFAULT_RELEASE_TAG}/{filename}"
+    ]
+
+
+def _gitee_urls(filename: str) -> list[str]:
+    return [
+        f"https://gitee.com/{DEFAULT_GITEE_REPO}/releases/download/"
+        f"{DEFAULT_RELEASE_TAG}/{filename}"
+    ]
+
+
+def default_memes_urls() -> list[str]:
+    return _gitee_urls(MEMES_ASSET_NAME) + _github_urls(MEMES_ASSET_NAME)
+
+
+def default_fonts_urls() -> list[str]:
+    return _gitee_urls(FONTS_ASSET_NAME) + _github_urls(FONTS_ASSET_NAME)
+
+
+def default_parts_manifest_urls() -> list[str]:
+    return _gitee_urls(MEMES_PARTS_MANIFEST) + _github_urls(MEMES_PARTS_MANIFEST)
+
+
+def default_part_urls(part_name: str) -> list[str]:
+    return _gitee_urls(part_name) + _github_urls(part_name)
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _source_id_from_url(url: str) -> str:
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
+    name = Path(urlparse(url).path).name or "pack"
+    name = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in name)
+    return f"extra_{name}_{digest}"
+
+
+def _safe_unlink(path: Path | None) -> None:
+    if not path:
+        return
+    try:
+        if path.is_file():
+            path.unlink(missing_ok=True)
+        elif path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def detect_archive_format(path: Path) -> str:
+    """Return archive kind: zip / tar.gz / tar / rar / 7z / unknown / empty."""
+    try:
+        if not path or not path.is_file() or path.stat().st_size <= 0:
+            return "empty"
+        with path.open("rb") as f:
+            head = f.read(16)
+    except Exception:
+        return "unknown"
+
+    name = path.name.lower()
+    if head[:2] == b"PK" or zipfile.is_zipfile(path):
+        return "zip"
+    if head[:4] == b"Rar!":
+        return "rar"
+    if head[:2] == b"7z":
+        return "7z"
+    # gzip header -> usually .tar.gz / .tgz
+    if len(head) >= 2 and head[0] == 0x1F and head[1] == 0x8B:
+        if name.endswith(".tar.gz") or name.endswith(".tgz") or name.endswith(".tar.gzip"):
+            return "tar.gz"
+        try:
+            with tarfile.open(path, "r:gz") as tf:
+                if tf.getmembers():
+                    return "tar.gz"
+        except Exception:
+            return "gzip"
+        return "tar.gz"
+    if name.endswith(".tar.gz") or name.endswith(".tgz"):
+        return "tar.gz"
+    if name.endswith(".tar") or tarfile.is_tarfile(path):
+        return "tar"
+    if name.endswith(".zip"):
+        return "zip"
+    if name.endswith(".rar"):
+        return "rar"
+    if name.endswith(".7z"):
+        return "7z"
+    return "unknown"
+
+
+def describe_unsupported_archive(path: Path) -> str:
+    kind = detect_archive_format(path)
+    if kind in {"zip", "tar.gz", "tar", "tgz"}:
+        return ""
+    if kind == "rar":
+        return (
+            f"检测到 RAR 资源包: {path.name}。"
+            "当前支持 ZIP / tar.gz（需要内部是 Python meme 模块：表情名/__init__.py+图片）。"
+            "请将 .rar 转为 .zip 或 .tar.gz 后重新配置直链。"
+        )
+    if kind == "7z":
+        return (
+            f"检测到 7z 资源包: {path.name}。"
+            "当前支持 ZIP / tar.gz，请转换后重试。"
+        )
+    if kind == "gzip":
+        return (
+            f"检测到 gzip 文件但无法按 tar.gz 打开: {path.name}。"
+            "请使用 .tar.gz（而不是单独的 .gz）。"
+        )
+    if kind == "empty":
+        return f"资源包为空或下载不完整: {path}"
+    return (
+        f"不是有效的资源包: {path}（识别格式: {kind}）。"
+        "请使用 ZIP 或 tar.gz 直链；RAR/7z 需先转换。"
+    )
+
+
+def _join_part_files(part_paths: list[Path], dest: Path) -> int:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    total = 0
+    tmp = dest.with_suffix(dest.suffix + ".joining")
+    with tmp.open("wb") as out:
+        for part in part_paths:
+            data = part.read_bytes()
+            out.write(data)
+            total += len(data)
+    tmp.replace(dest)
+    return total
+
+
+def _looks_like_meme_module(path: Path) -> bool:
+    """Python meme module: requires .py (usually __init__.py) + assets/config."""
+    if not path.is_dir():
+        return False
+    name = path.name.lower()
+    if name in WRAPPER_DIR_NAMES or name.startswith("__"):
+        return False
+    # reject common non-python package names / rust repos
+    if name.endswith(("-rs", "_rs")) or "contrib-rs" in name:
+        return False
+    if (path / "Cargo.toml").exists() or (path / "Cargo.lock").exists():
+        return False
+
+    has_py = False
+    has_asset = False
+    has_meme_meta = False
+    try:
+        children = list(path.iterdir())
+    except OSError:
+        return False
+
+    for child in children:
+        cname = child.name.lower()
+        if child.is_file():
+            if child.suffix.lower() == ".py":
+                has_py = True
+            if cname in {"config.json", "meme.toml", "meme.json", "meme.yaml", "meme.yml"}:
+                has_meme_meta = True
+            if child.suffix.lower() in IMAGE_EXTS:
+                has_asset = True
+        elif child.is_dir() and cname in {
+            "images",
+            "image",
+            "img",
+            "assets",
+            "static",
+            "resource",
+            "resources",
+            "gif",
+            "png",
+        }:
+            if any(p.is_file() for p in child.rglob("*")):
+                has_asset = True
+    # Python meme modules always ship with .py entry
+    return has_py and (has_asset or has_meme_meta or (path / "__init__.py").exists())
+
+
+def _score_meme_root(path: Path) -> int:
+    if not path.is_dir():
+        return -1
+    try:
+        children = [c for c in path.iterdir() if c.is_dir() and not c.name.startswith(".")]
+    except OSError:
+        return -1
+    module_count = sum(1 for c in children if _looks_like_meme_module(c))
+    score = module_count * 10
+    if module_count >= 3:
+        score += 20
+    if path.name.lower() in {"memes", "meme"}:
+        score += 5
+    return score
+
+
+def find_memes_content_root(extract_dir: Path) -> Path:
+    best: Path | None = None
+    best_score = -1
+    candidates = [extract_dir]
+    try:
+        for p in extract_dir.rglob("*"):
+            if not p.is_dir():
+                continue
+            try:
+                rel = p.relative_to(extract_dir)
+            except ValueError:
+                continue
+            if len(rel.parts) > 6:
+                continue
+            candidates.append(p)
+    except OSError:
+        pass
+
+    for cand in candidates:
+        score = _score_meme_root(cand)
+        if score > best_score:
+            best_score = score
+            best = cand
+
+    if best is not None and best_score > 0:
+        return best
+
+    cur = extract_dir
+    for _ in range(5):
+        try:
+            kids = [c for c in cur.iterdir() if not c.name.startswith(".")]
+        except OSError:
+            break
+        dirs = [c for c in kids if c.is_dir()]
+        files = [c for c in kids if c.is_file()]
+        if len(dirs) == 1 and not files:
+            cur = dirs[0]
+            continue
+        if len(dirs) == 1 and all(
+            f.name.lower() in {"readme.md", "license", "license.txt"} for f in files
+        ):
+            cur = dirs[0]
+            continue
+        break
+    return cur
+
+
+def _safe_relpath(name: str) -> str | None:
+    name = name.replace("\\", "/")
+    if not name or name.endswith("/"):
+        return None
+    parts = [p for p in name.split("/") if p not in ("", ".")]
+    if not parts or any(p == ".." for p in parts):
+        return None
+    return "/".join(parts)
+
+
+def _extract_zip_raw(zip_path: Path, target_dir: Path) -> int:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for info in zf.infolist():
+            rel = _safe_relpath(info.filename)
+            if not rel:
+                continue
+            out_path = target_dir / rel
+            if info.is_dir() or info.filename.endswith("/"):
+                out_path.mkdir(parents=True, exist_ok=True)
+                continue
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info, "r") as src, out_path.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+            count += 1
+    return count
+
+
+def _extract_tar_raw(tar_path: Path, target_dir: Path) -> int:
+    """Extract tar / tar.gz safely (no path traversal)."""
+    target_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    # r:* auto-detects gz/bz2/xz when possible
+    with tarfile.open(tar_path, "r:*") as tf:
+        for member in tf.getmembers():
+            rel = _safe_relpath(member.name)
+            if not rel:
+                continue
+            out_path = target_dir / rel
+            if member.isdir():
+                out_path.mkdir(parents=True, exist_ok=True)
+                continue
+            if not member.isfile():
+                # skip links/devices
+                continue
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            src = tf.extractfile(member)
+            if src is None:
+                continue
+            with src, out_path.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+            count += 1
+    return count
+
+
+def _extract_archive_raw(archive_path: Path, target_dir: Path) -> int:
+    kind = detect_archive_format(archive_path)
+    if kind == "zip":
+        return _extract_zip_raw(archive_path, target_dir)
+    if kind in {"tar.gz", "tar", "tgz"}:
+        return _extract_tar_raw(archive_path, target_dir)
+    msg = describe_unsupported_archive(archive_path) or f"不支持的压缩格式: {archive_path}"
+    raise RuntimeError(msg)
+
+
+def list_meme_modules(content_root: Path) -> list[Path]:
+    if _looks_like_meme_module(content_root):
+        return [content_root]
+    modules = [
+        c
+        for c in content_root.iterdir()
+        if c.is_dir() and _looks_like_meme_module(c)
+    ]
+    return sorted(modules, key=lambda p: p.name.lower())
+
+
+def _copy_meme_modules(src_root: Path, dest: Path) -> tuple[int, list[str], str]:
+    dest.mkdir(parents=True, exist_ok=True)
+    content_root = find_memes_content_root(src_root)
+    modules = list_meme_modules(content_root)
+    if modules:
+        count = 0
+        installed: list[str] = []
+        for mod in modules:
+            out = dest / mod.name
+            if out.exists():
+                shutil.rmtree(out, ignore_errors=True)
+            shutil.copytree(mod, out)
+            count += sum(1 for _ in out.rglob("*") if _.is_file())
+            installed.append(mod.name)
+        note = (
+            f"检测到资源根目录: "
+            f"{content_root.relative_to(src_root) if content_root != src_root else '.'}"
+        )
+        return count, sorted(set(installed), key=str.lower), note
+    return (
+        0,
+        [],
+        "未识别到可用的 meme 模块（需要 <表情名>/逻辑文件+图片）。"
+        "源码仓/纯图片包不能直接作为 Python meme 资源安装。",
+    )
+
+
+def install_memes_from_zip(zip_path: Path, target_dir: Path) -> tuple[int, str, list[str]]:
+    """Install memes from zip/tar.gz archive. Name kept for compatibility."""
+    return install_memes_from_archive(zip_path, target_dir)
+
+
+def install_memes_from_archive(
+    archive_path: Path, target_dir: Path
+) -> tuple[int, str, list[str]]:
+    work = Path(tempfile.mkdtemp(prefix="meme_extract_", dir=str(get_temp_dir())))
+    try:
+        raw = work / "raw"
+        n = _extract_archive_raw(archive_path, raw)
+        if n <= 0:
+            raise RuntimeError(f"压缩包为空: {archive_path}")
+        written, memes, note = _copy_meme_modules(raw, target_dir)
+        if written <= 0 or not memes:
+            raise RuntimeError(note or "压缩包中没有可安装的 meme 模块")
+        kind = detect_archive_format(archive_path)
+        if note:
+            note = f"[{kind}] {note}"
+        return written, note, memes
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def install_fonts_from_zip(zip_path: Path, target_dir: Path) -> int:
+    """Install fonts from zip/tar.gz archive."""
+    target_dir.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="font_extract_", dir=str(get_temp_dir())))
+    try:
+        raw = work / "raw"
+        _extract_archive_raw(zip_path, raw)
+        count = 0
+        for path in raw.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in FONT_EXTS:
+                continue
+            shutil.copy2(path, target_dir / path.name)
+            count += 1
+        return count
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _refresh_font_cache() -> str | None:
+    if sys.platform.startswith("linux") or sys.platform == "darwin":
+        fc = shutil.which("fc-cache")
+        if not fc:
+            return "未找到 fc-cache，请安装 fontconfig 后手动执行: fc-cache -fv"
+        try:
+            subprocess.run(
+                [fc, "-fv"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            return None
+        except Exception as exc:
+            return f"fc-cache 执行失败: {exc}"
+    return None
+
+
+def _normalize_url_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.replace("，", ",").replace("\r", "\n")
+        parts: list[str] = []
+        for line in text.split("\n"):
+            for item in line.split(","):
+                item = item.strip()
+                if item:
+                    parts.append(item)
+        return parts
+    if isinstance(value, (list, tuple, set)):
+        out: list[str] = []
+        for item in value:
+            out.extend(_normalize_url_list(item))
+        return out
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _empty_index() -> dict[str, Any]:
+    return {"version": INDEX_VERSION, "updated_at": 0, "sources": {}}
+
+
+def load_resource_index() -> dict[str, Any]:
+    path = get_resource_index_path()
+    legacy = get_plugin_root() / "data" / "resource_index.json"
+    read_path = path if path.is_file() else legacy
+    if not read_path.is_file():
+        return _empty_index()
+    try:
+        data = json.loads(read_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return _empty_index()
+        data.setdefault("version", INDEX_VERSION)
+        data.setdefault("sources", {})
+        if not isinstance(data["sources"], dict):
+            data["sources"] = {}
+        return data
+    except Exception as exc:
+        logger.warning("读取 resource_index.json 失败: %s", exc)
+        return _empty_index()
+
+
+def save_resource_index(index: dict[str, Any]) -> None:
+    index["version"] = INDEX_VERSION
+    index["updated_at"] = int(time.time())
+    path = get_resource_index_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def meme_module_exists(target_dir: Path | None, name: str) -> bool:
+    if not target_dir:
+        return False
+    path = target_dir / name
+    return _looks_like_meme_module(path)
+
+
+def source_memes_present(target_dir: Path | None, memes: list[str]) -> bool:
+    if not memes:
+        return False
+    return all(meme_module_exists(target_dir, name) for name in memes)
 
 
 async def _download_to_path(
@@ -427,38 +949,24 @@ async def _download_to_path(
     timeout_sec = clamp_download_timeout(timeout_sec)
     last_error: Exception | None = None
     dest.parent.mkdir(parents=True, exist_ok=True)
-    any_github = any(is_github_url(u) or "github.com" in u for u in urls)
-    used_proxy = any(
-        normalize_github_proxy(p) and normalize_github_proxy(p) in u
-        for u in urls
-        for p in (ASTRBOT_GITHUB_PROXIES + LEGACY_GITHUB_PROXIES + [selected_proxy])
-        if p
-    ) or any("/https://github.com/" in u or "/http://github.com/" in u for u in urls)
 
     def _timeout_hint(url: str) -> None:
-        # No usable proxy configured/selected and GitHub download timed out
-        no_proxy = not (proxy_enabled and (selected_proxy or get_selected_github_proxy() or used_proxy))
-        if not no_proxy and proxy_enabled:
-            # still hint when this particular attempt looks like direct github
-            if is_github_url(url) and proxy_enabled:
-                logger.warning(
-                    "GitHub 直连下载超时: %s。当前强制代理已开启，将继续尝试其他代理源。",
-                    url,
-                )
-                return
-        if is_github_url(url) or "github.com" in url:
-            if not proxy_enabled:
-                logger.warning(
-                    "GitHub 下载超时且未启用强制代理(use_github_proxy=false): %s。"
-                    "可在配置面板开启「强制 GitHub 走代理」，或执行 /meme代理测速 后重试。",
-                    url,
-                )
-            elif not (selected_proxy or get_selected_github_proxy()):
-                logger.warning(
-                    "GitHub 下载超时且尚未选择可用代理: %s。"
-                    "请执行 /meme代理测速 自动选择最低延迟代理，或在配置面板填写 github_proxy。",
-                    url,
-                )
+        looks_github = is_github_url(url) or "github.com" in url
+        if not looks_github:
+            return
+        if proxy_enabled is False:
+            logger.warning(
+                "GitHub 下载超时且未启用强制代理(use_github_proxy=false): %s。"
+                "可在配置面板开启「强制 GitHub 走代理」，或执行 /meme代理测速 后重试。",
+                url,
+            )
+            return
+        if proxy_enabled and not (selected_proxy or get_selected_github_proxy()):
+            logger.warning(
+                "GitHub 下载超时且尚未选择可用代理: %s。"
+                "请执行 /meme代理测速 自动选择最低延迟代理，或在配置面板填写 github_proxy。",
+                url,
+            )
 
     for url in urls:
         tmp = dest.with_suffix(dest.suffix + ".part")
@@ -531,7 +1039,7 @@ class ResourceInstaller:
         self.github_proxy = normalize_github_proxy(github_proxy)
         self.proxy_probe_on_fix = bool(proxy_probe_on_fix)
         self._ranked_proxies: list[str] | None = None
-        self._selected_proxy: str = normalize_github_proxy(github_proxy) or get_selected_github_proxy()
+        self._selected_proxy: str = self.github_proxy or get_selected_github_proxy()
         self._session: aiohttp.ClientSession | None = None
         self._memes_lock = asyncio.Lock()
         self._fonts_lock = asyncio.Lock()
@@ -547,27 +1055,12 @@ class ResourceInstaller:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    def _load_ranked_proxies_from_cache(self) -> list[str]:
-        cache = load_github_proxy_rank()
-        ranked = [
-            str(x.get("proxy"))
-            for x in (cache.get("proxies") or [])
-            if x.get("available") and x.get("proxy")
-        ]
-        if ranked:
-            self._ranked_proxies = ranked
-        return ranked
-
     async def ensure_github_proxy_rank(
         self,
         progress_cb: Callable[[str], None] | None = None,
         force: bool = False,
     ) -> list[str]:
-        """Speed-test GitHub proxies and auto-select the lowest latency one.
-
-        Config `github_proxy` (panel) overrides auto selection.
-        Gitee links are never proxied.
-        """
+        """Probe proxies and auto-select lowest latency (panel github_proxy overrides)."""
         if not self.use_github_proxy:
             self._ranked_proxies = []
             self._selected_proxy = ""
@@ -575,7 +1068,6 @@ class ResourceInstaller:
                 progress_cb("强制 GitHub 代理已关闭（配置 use_github_proxy=false）")
             return []
 
-        # Panel custom proxy wins
         if self.github_proxy:
             self._ranked_proxies = [self.github_proxy]
             self._selected_proxy = self.github_proxy
@@ -591,20 +1083,17 @@ class ResourceInstaller:
             for x in (cache.get("proxies") or [])
             if x.get("available") and x.get("proxy")
         ]
-        selected = normalize_github_proxy(str(cache.get("selected") or "")) or (cached[0] if cached else "")
+        selected = normalize_github_proxy(str(cache.get("selected") or "")) or (
+            cached[0] if cached else ""
+        )
 
-        if not force and cached and selected and (age <= GITHUB_PROXY_CACHE_TTL or not self.proxy_probe_on_fix):
+        if not force and cached and selected and (
+            age <= GITHUB_PROXY_CACHE_TTL or not self.proxy_probe_on_fix
+        ):
             self._ranked_proxies = cached
             self._selected_proxy = selected
             if progress_cb:
                 progress_cb(f"使用已选 GitHub 代理: {selected}（缓存 {age}s）")
-            return cached
-
-        if not force and not self.proxy_probe_on_fix and cached:
-            self._ranked_proxies = cached
-            self._selected_proxy = selected or cached[0]
-            if progress_cb:
-                progress_cb(f"跳过测速，使用代理: {self._selected_proxy}")
             return cached
 
         session = await self._get_session()
@@ -612,12 +1101,11 @@ class ResourceInstaller:
         available = [str(x["proxy"]) for x in ranked if x.get("available")]
         if available:
             best = available[0]
-            set_selected_github_proxy(best)
-            # re-save full rank with selected
-            cache = load_github_proxy_rank()
-            cache["selected"] = best
-            cache["proxies"] = ranked
-            cache["updated_at"] = int(time.time())
+            cache = {
+                "updated_at": int(time.time()),
+                "proxies": ranked,
+                "selected": best,
+            }
             save_github_proxy_rank(cache)
             self._selected_proxy = best
             self._ranked_proxies = available
@@ -627,12 +1115,11 @@ class ResourceInstaller:
 
         self._ranked_proxies = list(ASTRBOT_GITHUB_PROXIES)
         self._selected_proxy = ""
-        if progress_cb:
-            progress_cb("未测得可用代理；GitHub 下载可能失败，请检查网络或在面板填写 github_proxy")
         logger.warning(
-            "GitHub 代理测速无可用节点。未配置自定义代理时，强制代理模式下 GitHub 资源可能无法下载。"
-            "请执行 /meme代理测速 重试，或在配置面板填写 github_proxy。"
+            "GitHub 代理测速无可用节点。请执行 /meme代理测速 重试，或在配置面板填写 github_proxy。"
         )
+        if progress_cb:
+            progress_cb("未测得可用代理；请检查网络或填写自定义代理")
         return self._ranked_proxies
 
     def prepare_urls(self, urls: list[str]) -> list[str]:
@@ -651,7 +1138,11 @@ class ResourceInstaller:
         dest: Path,
         progress_cb: Callable[[str], None] | None = None,
     ) -> None:
-        selected = self.github_proxy or getattr(self, "_selected_proxy", "") or get_selected_github_proxy()
+        selected = (
+            self.github_proxy
+            or getattr(self, "_selected_proxy", "")
+            or get_selected_github_proxy()
+        )
         await _download_to_path(
             session,
             self.prepare_urls(urls),
@@ -660,13 +1151,6 @@ class ResourceInstaller:
             timeout_sec=self.download_timeout,
             proxy_enabled=self.use_github_proxy,
             selected_proxy=selected,
-        )
-
-        return expand_urls_with_github_proxies(
-            urls,
-            ranked_proxies=self._ranked_proxies,
-            fixed_proxy=self.github_proxy,
-            use_proxy=self.use_github_proxy,
         )
 
     def _upsert_source(
@@ -715,8 +1199,6 @@ class ResourceInstaller:
             f"- 资源源数量: {len(sources)}",
             f"- 额外配置链接: {len(self.extra_meme_resource_urls)} 条",
             f"- 下载超时: {self.download_timeout}s（30-300）",
-            f"- 强制 GitHub 代理: {'开' if self.use_github_proxy else '关'}",
-            f"- 当前代理: {self.github_proxy or getattr(self, '_selected_proxy', '') or get_selected_github_proxy() or '未选择'}",
             f"- 插件数据目录: {get_plugin_data_dir()}",
             "- 安装策略: 本地包优先 + 增量（hash 未变且表情在位则跳过）",
         ]
@@ -1118,11 +1600,10 @@ class ResourceInstaller:
         skipped = 0
         failed = 0
 
-        # GitHub mirror speed-test (AstrBot-compatible), used when falling back to GitHub
         try:
             await self.ensure_github_proxy_rank(progress_cb=log, force=False)
         except Exception as exc:
-            logger.warning("GitHub 代理测速失败，将按默认顺序尝试: %s", exc)
+            logger.warning("GitHub 代理测速失败，将按已有排序/直连策略尝试: %s", exc)
 
         log(
             f"数据目录: {data_dir}；下载超时: {self.download_timeout}s；"
