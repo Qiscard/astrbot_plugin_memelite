@@ -380,17 +380,26 @@ class MemePlugin(Star):
         if not keyword or keyword in self.conf["memes_disabled_list"]:
             return
 
-        # 保护反弹
+        # 保护反弹：目标命中保护名单时，强制把触发者作为被制作对象
         protected_users = self._parse_csv_set(self.conf.get("protected_users", ""))
         bounce_memes = self._parse_csv_set(self.conf.get("bounce_back_memes", ""))
         should_bounce = False
         protected_user_id = None
         if protected_users:
-            meme_should_bounce = not bounce_memes or keyword in bounce_memes
+            # bounce_back_memes 为空 = 全部表情反弹；非空则关键词或其别名命中即反弹
+            meme_should_bounce = (not bounce_memes) or self._keyword_in_bounce_list(
+                keyword, bounce_memes
+            )
             if meme_should_bounce:
                 protected_user_id = self._check_target_protected(event, protected_users)
                 if protected_user_id:
                     should_bounce = True
+                    logger.info(
+                        "meme 反弹触发: keyword=%s sender=%s protected=%s",
+                        keyword,
+                        event.get_sender_id(),
+                        protected_user_id,
+                    )
 
         try:
             if should_bounce:
@@ -425,33 +434,73 @@ class MemePlugin(Star):
         if image:
             yield event.chain_result([Comp.Image.fromBytes(image)])  # type: ignore
 
+    def _normalize_uid(self, value) -> str:
+        """Normalize platform user id for set membership checks."""
+        if value is None:
+            return ""
+        text = str(value).strip()
+        if text.endswith(".0") and text.replace(".", "", 1).isdigit():
+            text = text[:-2]
+        return text
+
     def _check_target_protected(
         self, event: AstrMessageEvent, protected_users: set
     ) -> str | None:
-        """检查消息目标是否在保护名单中，命中则返回用户ID"""
-        chain = event.get_messages()
+        """检查消息目标是否在保护名单中，命中则返回用户ID。
 
+        支持：
+        - @保护用户
+        - 文本 @QQ号
+        - 引用保护用户的消息
+        """
+        if not protected_users:
+            return None
+
+        protected = {self._normalize_uid(x) for x in protected_users if self._normalize_uid(x)}
+        self_id = self._normalize_uid(event.get_self_id())
+        sender_id = self._normalize_uid(event.get_sender_id())
+        chain = event.get_messages() or []
+
+        # 1) 引用消息：优先（常见玩法：回复某人再发“摸”）
+        for seg in chain:
+            if isinstance(seg, Comp.Reply):
+                rid = self._normalize_uid(getattr(seg, "sender_id", None) or getattr(seg, "qq", None))
+                if rid and rid in protected and rid != sender_id:
+                    return rid
+
+        # 2) @ 段（跳过 @bot / @all）
         for seg in chain:
             if isinstance(seg, Comp.At):
-                if str(seg.qq) in protected_users:
-                    return str(seg.qq)
-            elif isinstance(seg, Comp.Plain):
-                for word in seg.text.strip().split():
-                    if word.startswith("@") and word[1:].isdigit():
-                        if word[1:] in protected_users:
-                            return word[1:]
+                qq = self._normalize_uid(getattr(seg, "qq", None))
+                if not qq or qq.lower() == "all" or qq == self_id:
+                    continue
+                if qq in protected and qq != sender_id:
+                    return qq
 
-        reply_seg = next((seg for seg in chain if isinstance(seg, Comp.Reply)), None)
-        if reply_seg and reply_seg.sender_id:
-            if str(reply_seg.sender_id) in protected_users:
-                return str(reply_seg.sender_id)
+        # 3) 纯文本 @123456
+        for seg in chain:
+            if isinstance(seg, Comp.Plain):
+                for word in (seg.text or "").replace("​", " ").split():
+                    token = word.strip()
+                    if token.startswith("@") and token[1:].isdigit():
+                        qq = self._normalize_uid(token[1:])
+                        if qq in protected and qq != sender_id:
+                            return qq
+
         return None
 
-    def _parse_csv_set(self, value: str) -> set[str]:
-        """解析逗号分隔配置为集合"""
-        if not value or not str(value).strip():
+    def _parse_csv_set(self, value) -> set[str]:
+        """解析逗号/列表配置为集合"""
+        if value is None:
             return set()
-        return {item.strip() for item in str(value).split(",") if item.strip()}
+        if isinstance(value, (list, tuple, set)):
+            return {str(item).strip() for item in value if str(item).strip()}
+        text = str(value).strip()
+        if not text:
+            return set()
+        # 兼容中文逗号
+        text = text.replace("，", ",")
+        return {item.strip() for item in text.split(",") if item.strip()}
 
     async def terminate(self):
         """插件终止时清理资源检查任务与 HTTP 会话"""
