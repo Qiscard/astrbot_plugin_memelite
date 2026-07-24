@@ -1,1 +1,8 @@
+# 忽略大体量资源包（通过 Release 分发）
+assets/dist/
+*.rar
 __pycache__/
+*.pyc
+.pytest_cache/
+_pack_assets.py
+_patch_meme.py

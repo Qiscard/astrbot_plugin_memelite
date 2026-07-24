@@ -183,17 +183,29 @@ class MemeManager:
         raise RuntimeError(f"{action} failed: {detail or repr(result)}")
 
     async def check_resources(self):
+        """Optional legacy online resource check from upstream meme-generator.
+
+        Preferred path is plugin commands:
+        - /meme表情修复
+        - /meme字体修复
+        """
         if not MEME_GENERATOR_AVAILABLE:
             logger.error(
-                "meme-generator 不可用，跳过资源检查。请安装: pip install 'meme_generator>=0.1.14,<0.2.0'"
+                "meme-generator 不可用，跳过资源检查。"
+                "请先修复环境依赖（/meme检查），并安装: "
+                "pip install 'meme_generator>=0.1.14,<0.2.0'"
             )
             return
 
-        if not self.conf.get("is_check_resources", True):
+        if not self.conf.get("is_check_resources", False):
             self._load_memes()
             return
 
-        logger.info("开始检查memes资源...")
+        if not self.check_resources_func:
+            self._load_memes()
+            return
+
+        logger.info("开始检查 memes 官方在线资源(is_check_resources=true)...")
         try:
             if self.is_py_version:
                 await self.check_resources_func()
@@ -202,7 +214,9 @@ class MemeManager:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(f"检查memes资源失败: {e}")
+            logger.error(
+                f"检查memes资源失败: {e}。也可改用管理员命令 /meme表情修复 安装本仓库资源包"
+            )
         self._load_memes()
 
     def find_meme(self, keyword: str) -> Any | None:

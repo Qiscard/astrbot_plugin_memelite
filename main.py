@@ -10,8 +10,10 @@ from astrbot.core.platform import AstrMessageEvent
 from astrbot.core.star.filter.event_message_type import EventMessageType
 from astrbot.core.star.filter.permission import PermissionType
 
+from .core.env_check import detect_environment
 from .core.meme import MemeManager
 from .core.param import ParamsCollector
+from .core.resources import ResourceInstaller, count_installed_meme_fonts, count_meme_image_files, get_memes_target_dir
 from .utils import compress_image
 
 
@@ -21,22 +23,91 @@ class MemePlugin(Star):
         self.conf = config
         self.collector = ParamsCollector(config)
         self.manager = MemeManager(config, self.collector)
-        self._resource_task: asyncio.Task | None = None
+        self.resources = ResourceInstaller(
+            repo=str(config.get("resource_repo") or "Qiscard/astrbot_plugin_memelite"),
+            release_tag=str(config.get("resource_release_tag") or "assets-v1"),
+            memes_url=str(config.get("memes_url") or ""),
+            fonts_url=str(config.get("fonts_url") or ""),
+            local_memes_dir=str(config.get("local_memes_dir") or ""),
+            local_fonts_dir=str(config.get("local_fonts_dir") or ""),
+            local_memes_zip=str(config.get("local_memes_zip") or ""),
+            local_fonts_zip=str(config.get("local_fonts_zip") or ""),
+        )
+        self._bootstrap_task: asyncio.Task | None = None
+        self._env_report = detect_environment()
+        self._env_ok = self._env_report.ok
 
     async def initialize(self):
-        self._resource_task = asyncio.create_task(self.manager.check_resources())
+        # Always log environment status on startup
+        if not self._env_ok:
+            logger.error(
+                "astrbot_plugin_memelite 环境检查未通过:\n%s",
+                self._env_report.format_message(),
+            )
+        else:
+            logger.info("astrbot_plugin_memelite 环境检查通过")
+
+        self._bootstrap_task = asyncio.create_task(self._bootstrap())
+
+    async def _bootstrap(self):
+        """Startup checks only. Heavy assets are installed via repair commands."""
+        try:
+            # Optional auto-fix if enabled and resources look missing
+            auto_fix = bool(self.conf.get("auto_fix_resources_on_start", False))
+            if auto_fix and self._env_ok:
+                memes_dir = get_memes_target_dir()
+                if count_meme_image_files(memes_dir) < 50:
+                    logger.info("检测到表情资源不足，自动执行表情修复...")
+                    msg = await self.resources.fix_memes()
+                    logger.info(msg)
+                if count_installed_meme_fonts() < 3:
+                    logger.info("检测到字体资源不足，自动执行字体修复...")
+                    msg = await self.resources.fix_fonts()
+                    logger.info(msg)
+
+            # Legacy online check_resources (official upstream images) - off by default
+            if self.conf.get("is_check_resources", False):
+                await self.manager.check_resources()
+            else:
+                self.manager._load_memes()
+
+            img_count = count_meme_image_files(get_memes_target_dir())
+            font_count = count_installed_meme_fonts()
+            if img_count < 50:
+                logger.warning(
+                    "表情图片资源不足(当前 %s 个文件)。请管理员发送: /meme表情修复",
+                    img_count,
+                )
+            if font_count < 3:
+                logger.warning(
+                    "字体资源不足(当前 %s 个文件)。请管理员发送: /meme字体修复",
+                    font_count,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"插件启动检查失败: {exc}")
 
     @filter.command("meme帮助", alias={"表情帮助", "meme菜单", "meme列表"})
     async def memes_help(self, event):
+        if not self._env_ok:
+            yield event.plain_result(self._env_report.format_message())
+            return
         if output := await self.manager.render_meme_list_image():
             yield event.chain_result([Comp.Image.fromBytes(output)])
         else:
-            yield event.plain_result("meme列表图生成失败")
+            yield event.plain_result(
+                "meme列表图生成失败。请先执行 /meme检查 查看依赖与资源状态，"
+                "必要时使用 /meme表情修复 与 /meme字体修复"
+            )
 
     @filter.command("meme详情", alias={"表情详情", "meme信息"})
     async def meme_details_show(
         self, event: AstrMessageEvent, keyword: str | int | None = None
     ):
+        if not self._env_ok:
+            yield event.plain_result(self._env_report.format_message())
+            return
         if not keyword:
             yield event.plain_result("未指定要查看的meme")
             return
@@ -53,6 +124,46 @@ class MemePlugin(Star):
             Comp.Image.fromBytes(preview),
         ]
         yield event.chain_result(chain)
+
+    @filter.command("meme检查", alias={"meme环境", "meme状态", "meme依赖"})
+    async def meme_check(self, event: AstrMessageEvent):
+        """检查系统依赖与资源状态"""
+        self._env_report = detect_environment()
+        self._env_ok = self._env_report.ok
+        parts = [self._env_report.format_message(), "", self.resources.status_text()]
+        if self._env_ok:
+            parts.append("")
+            parts.append("资源修复命令：")
+            parts.append("- /meme表情修复")
+            parts.append("- /meme字体修复")
+        yield event.plain_result("\n".join(parts))
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("meme表情修复", alias={"表情修复", "meme下载表情", "meme资源修复"})
+    async def meme_fix_images(self, event: AstrMessageEvent):
+        """下载/解压表情资源包到 meme_generator/memes"""
+        if not self._env_ok:
+            # still allow install of assets, but warn
+            yield event.plain_result(
+                "警告：系统依赖检查未通过，先尝试修复表情资源。\n"
+                + self._env_report.format_message()
+                + "\n\n开始表情修复..."
+            )
+        else:
+            yield event.plain_result("开始表情修复，请稍候...")
+
+        result = await self.resources.fix_memes()
+        # reload meme list after install
+        self.manager._load_memes()
+        yield event.plain_result(result)
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("meme字体修复", alias={"字体修复", "meme下载字体", "meme安装字体"})
+    async def meme_fix_fonts(self, event: AstrMessageEvent):
+        """下载/安装表情字体到用户字体目录"""
+        yield event.plain_result("开始字体修复，请稍候...")
+        result = await self.resources.fix_fonts()
+        yield event.plain_result(result)
 
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("禁用meme")
@@ -211,6 +322,9 @@ class MemePlugin(Star):
     @filter.event_message_type(EventMessageType.ALL)
     async def meme_handle(self, event: AstrMessageEvent):
         """处理 meme 生成的主流程"""
+        if not self._env_ok:
+            return
+
         if self.conf["need_prefix"] and not event.is_at_or_wake_command:
             return
 
@@ -310,8 +424,9 @@ class MemePlugin(Star):
 
     async def terminate(self):
         """插件终止时清理资源检查任务与 HTTP 会话"""
-        if self._resource_task and not self._resource_task.done():
-            self._resource_task.cancel()
+        if self._bootstrap_task and not self._bootstrap_task.done():
+            self._bootstrap_task.cancel()
             with suppress(asyncio.CancelledError):
-                await self._resource_task
+                await self._bootstrap_task
+        await self.resources.close()
         await self.collector.close()
