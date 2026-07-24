@@ -28,6 +28,9 @@ class MemePlugin(Star):
             or config.get("extra_meme_resource_urls")
             or [],
             download_timeout=config.get("download_timeout", 180),
+            use_github_proxy=bool(config.get("use_github_proxy", True)),
+            github_proxy=str(config.get("github_proxy") or ""),
+            proxy_probe_on_fix=bool(config.get("proxy_probe_on_fix", True)),
         )
         self._bootstrap_task: asyncio.Task | None = None
         self._env_report = detect_environment()
@@ -193,6 +196,61 @@ class MemePlugin(Star):
         reload_msg = self.manager.reload_memes()
         logger.info(reload_msg)
         yield event.plain_result(result)
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("meme代理测速", alias={"github代理测速", "meme测速", "代理测速"})
+    async def meme_proxy_probe(self, event: AstrMessageEvent):
+        """测速并自动选择最低延迟 GitHub 代理；强制 GitHub 走代理（Gitee 不受影响）。"""
+        self._sync_resource_settings()
+        yield event.plain_result("开始 GitHub 代理测速，请稍候...")
+
+        def cb(msg: str) -> None:
+            logger.info(msg)
+
+        try:
+            ranked = await self.resources.ensure_github_proxy_rank(progress_cb=cb, force=True)
+            if not self.resources.use_github_proxy:
+                yield event.plain_result(
+                    "强制 GitHub 代理已关闭。\n"
+                    "请在配置面板开启 use_github_proxy 后再生效。"
+                )
+                return
+
+            from .core.resources import load_github_proxy_rank, get_selected_github_proxy
+
+            selected = self.resources.github_proxy or get_selected_github_proxy()
+            if self.resources.github_proxy:
+                yield event.plain_result(
+                    "已使用配置面板固定代理（优先生效）\n"
+                    f"{self.resources.github_proxy}\n"
+                    "GitHub 链接将强制走该代理；Gitee 不受影响。"
+                )
+                return
+            if not ranked or not selected:
+                yield event.plain_result(
+                    "未测得可用代理，未能自动选择。\n"
+                    "请检查网络，或在配置面板填写 github_proxy。"
+                )
+                return
+
+            lines = [
+                "GitHub 代理测速完成",
+                f"已自动选择最低延迟: {selected}",
+                "GitHub 链接将强制走代理；Gitee 不受影响。",
+                f"可用: {len(ranked)}",
+            ]
+            cache = load_github_proxy_rank()
+            top = [x for x in (cache.get("proxies") or []) if x.get("available")][:3]
+            for idx, item in enumerate(top, 1):
+                mark = " <- 已选" if item.get("proxy") == selected else ""
+                lines.append(
+                    f"{idx}. {item.get('proxy')}  {item.get('latency')} ms{mark}"
+                )
+            yield event.plain_result("\n".join(lines))
+        except Exception as exc:
+            logger.exception("代理测速失败")
+            yield event.plain_result(f"代理测速失败: {exc}")
+
 
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command(
@@ -521,9 +579,16 @@ class MemePlugin(Star):
             or []
         )
         try:
-            from .core.resources import clamp_download_timeout
+            from .core.resources import clamp_download_timeout, normalize_github_proxy
             self.resources.download_timeout = clamp_download_timeout(
                 self.conf.get("download_timeout", 180)
+            )
+            self.resources.use_github_proxy = bool(self.conf.get("use_github_proxy", True))
+            self.resources.github_proxy = normalize_github_proxy(
+                self.conf.get("github_proxy") or ""
+            )
+            self.resources.proxy_probe_on_fix = bool(
+                self.conf.get("proxy_probe_on_fix", True)
             )
         except Exception:
             pass

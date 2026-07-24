@@ -46,6 +46,24 @@
         },
         "default": 180
     },
+    "use_github_proxy": {
+        "description": "强制 GitHub 走代理",
+        "type": "bool",
+        "hint": "开启后 GitHub 资源下载强制走镜像代理（Gitee 不受影响）。关闭则 GitHub 直连。仅配置面板可开关。",
+        "default": true
+    },
+    "github_proxy": {
+        "description": "自定义 GitHub 代理",
+        "type": "string",
+        "hint": "留空=使用 /meme代理测速 自动选择的最低延迟代理。填写后优先生效，例如 https://gh-proxy.com",
+        "default": ""
+    },
+    "proxy_probe_on_fix": {
+        "description": "修复时自动代理测速",
+        "type": "bool",
+        "hint": "开启后缓存超过 12 小时会在修复时自动测速并重选最低延迟代理。也可手动 /meme代理测速",
+        "default": true
+    },
     "meme_timeout": {
         "description": "meme生成的超时时长",
         "type": "int",

@@ -103,6 +103,9 @@ AstrBot 面板：插件管理 -> astrbot_plugin_memelite -> 插件配置
 | `auto_fix_resources_on_start` | 启动时自动修复表情/字体 | `false` |
 | `meme_resource_urls` | **meme 资源添加**（批量 zip/tar.gz 直链） | `[]` |
 | `download_timeout` | 资源下载最大延时（秒，30-300） | `180` |
+| `use_github_proxy` | **强制 GitHub 走代理**（Gitee 不受影响） | `true` |
+| `github_proxy` | 自定义 GitHub 代理（留空=测速自动选最低延迟） | `""` |
+| `proxy_probe_on_fix` | 修复时自动代理测速（缓存 12h） | `true` |
 | `meme_timeout` | 生成超时（秒） | `15` |
 | `memes_disabled_list` | meme 黑名单 | `[]` |
 | `user_blacklist` | 用户黑名单 | `""` |
@@ -209,6 +212,7 @@ meme_generator/memes/<表情名称>/逻辑文件 + 图片资源
 | `/meme检查` | 环境依赖与资源状态摘要 | 普通 |
 | `/meme表情修复` | 增量安装默认 + 额外资源；加“强制”全量重装；完成后热重载 | 管理员 |
 | `/meme字体修复` | 安装默认字体资源 | 管理员 |
+| `/meme代理测速` | 测速并缓存最优 GitHub 代理 | 管理员 |
 | `禁用meme xxx` / `启用meme xxx` | 黑名单 | 管理员 |
 | `meme黑名单` | 查看禁用列表 | 管理员 |
 | `添加保护` / `移除保护` / `保护名单` | 保护名单 | 管理员 |
@@ -247,3 +251,15 @@ meme_generator/memes/<表情名称>/逻辑文件 + 图片资源
 `/meme资源列表` 仅发送按名称排序（0-9 → a-z → 其他）的表情列表图；资源源、路径、失败原因等详情写入日志。
 
 `/meme表情修复` 聊天回执仅保留简要结果；详细路径与跳过/失败原因见日志。
+
+
+## GitHub 镜像加速
+
+对齐 AstrBot 面板 GitHub 代理测速：
+
+- `/meme代理测速`：测速后**自动选择延迟最低**的代理并缓存
+- `use_github_proxy=true` 时，**GitHub 链接强制走代理**（不直连）；**Gitee 不受影响**
+- 开关强制代理 / 自定义代理：**仅配置面板**（`use_github_proxy` / `github_proxy`）
+- 未配置代理且下载超时时，日志输出提示（建议测速或填写代理）
+- 缓存文件：`data/plugin_data/astrbot_plugin_memelite/index/github_proxy_rank.json`
+
