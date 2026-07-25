@@ -88,8 +88,8 @@ class MemePlugin(Star):
             logger.error(f"插件启动检查失败: {exc}")
 
     @filter.command(
-        "meme资源列表",
-        alias={"资源列表", "meme源列表", "meme资源", "表情资源列表"},
+        "meme列表",
+        alias={"meme资源列表", "资源列表", "meme源列表", "meme资源", "表情资源列表", "表情列表"},
     )
     async def meme_resource_list(self, event: AstrMessageEvent):
         """仅发送按名称排序的表情列表图片；资源状态详情只写日志。"""
@@ -104,10 +104,10 @@ class MemePlugin(Star):
                     f"- {u}" for u in pending
                 )
                 detail += "\n执行 /meme表情修复 后写入清单。"
-            logger.info("meme资源列表详情:\n%s", detail)
+            logger.info("meme列表详情:\n%s", detail)
             logger.info("meme资源状态:\n%s", self.resources.status_text())
         except Exception as exc:
-            logger.warning("输出资源列表日志失败: %s", exc)
+            logger.warning("输出列表日志失败: %s", exc)
 
         if not self._env_ok:
             logger.warning("环境检查未通过，仍尝试渲染表情列表图")
@@ -118,11 +118,23 @@ class MemePlugin(Star):
         except Exception:
             self.manager._load_memes()
 
-        image = await self.manager.render_meme_list_image()
-        if not image:
+        try:
+            images = await self.manager.render_meme_list_images()
+        except Exception as exc:
+            logger.error("渲染表情列表失败: %s", exc)
+            images = []
+        if not images:
             yield event.plain_result("表情列表图生成失败，详情见日志")
             return
-        yield event.chain_result([Comp.Image.fromBytes(image)])
+
+        # only images in chat; multi-page if needed
+        chain = [Comp.Image.fromBytes(img) for img in images]
+        logger.info(
+            "发送 meme 列表图: pages=%s style=%s",
+            len(images),
+            self.conf.get("meme_list_style", "standard"),
+        )
+        yield event.chain_result(chain)
 
     @filter.command("meme详情", alias={"表情详情", "meme信息"})
     async def meme_details_show(
@@ -148,6 +160,49 @@ class MemePlugin(Star):
         ]
         yield event.chain_result(chain)
 
+
+    @filter.command("meme排行", alias={"表情排行", "meme热门", "热门表情", "meme top"})
+    async def meme_ranking(self, event: AstrMessageEvent):
+        """输出全局热门表情 TOP20（不足则按实际数量）。"""
+        from .core.usage import top_usage, usage_summary_text
+
+        top = top_usage(20)
+        logger.info("meme排行详情:\n%s", usage_summary_text())
+        if not top:
+            yield event.plain_result("暂无使用记录。触发任意表情后会开始全局计数。")
+            return
+
+        lines = [f"🔥 meme 热门排行（全局 TOP{len(top)}）"]
+        for idx, (key, count, _fs, _lu) in enumerate(top, 1):
+            meme = self.manager.find_meme(key)
+            if meme:
+                kws = self.manager._get_keywords(meme)
+                title = " / ".join(kws[:3]) if kws else key
+            else:
+                title = key
+            try:
+                hot_min = int(self.conf.get("meme_hot_min_count", 3) or 3)
+            except Exception:
+                hot_min = 3
+            mark = " 🔥" if hot_min > 0 and count >= hot_min else ""
+            lines.append(f"{idx}. {title}（{key}）— {count}次{mark}")
+        yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("meme重置", alias={"重置meme统计", "meme统计重置", "清空meme排行"})
+    async def meme_reset_stats(self, event: AstrMessageEvent):
+        """重置全局 hot/new/使用计数。"""
+        from .core.usage import reset_usage, usage_file
+
+        prev = reset_usage()
+        msg = (
+            "已重置全局表情统计（hot / new / 计数器）\n"
+            f"清理前：登记 {prev.get('keys', 0)}，总触发 {prev.get('uses', 0)}\n"
+            f"计数文件：{usage_file()}"
+        )
+        logger.info("meme统计已重置: %s", prev)
+        yield event.plain_result(msg)
+
     @filter.command("meme检查", alias={"meme环境", "meme状态", "meme依赖"})
     async def meme_check(self, event: AstrMessageEvent):
         """检查系统依赖与资源状态"""
@@ -157,9 +212,11 @@ class MemePlugin(Star):
         if self._env_ok:
             parts.append("")
             parts.append("资源命令：")
-            parts.append("- /meme资源列表  （按名称查看 链接/包/表情清单）")
+            parts.append("- /meme列表  （按名称排序列表图）")
+            parts.append("- /meme排行  （全局热门 TOP20）")
             parts.append("- /meme表情修复  （增量安装；加“强制”可全量重装）")
             parts.append("- /meme字体修复  （默认内置源）")
+            parts.append("- /meme重置  （管理员：清空全局计数/hot/new）")
         yield event.plain_result("\n".join(parts))
 
     @filter.permission_type(PermissionType.ADMIN)
@@ -169,11 +226,6 @@ class MemePlugin(Star):
             "表情修复",
             "meme下载表情",
             "meme资源修复",
-            "meme表情修复2",
-            "表情修复2",
-            "meme下载表情2",
-            "meme资源修复2",
-            "meme表情修复gitee",
         },
     )
     async def meme_fix_images(self, event: AstrMessageEvent):
@@ -200,7 +252,7 @@ class MemePlugin(Star):
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("meme代理测速", alias={"github代理测速", "meme测速", "代理测速"})
     async def meme_proxy_probe(self, event: AstrMessageEvent):
-        """测速并自动选择最低延迟 GitHub 代理；强制 GitHub 走代理（Gitee 不受影响）。"""
+        """测速 GitHub 代理；最低延迟≤3000ms 才自动选用。Gitee 始终直链。"""
         self._sync_resource_settings()
         yield event.plain_result("开始 GitHub 代理测速，请稍候...")
 
@@ -208,45 +260,62 @@ class MemePlugin(Star):
             logger.info(msg)
 
         try:
-            ranked = await self.resources.ensure_github_proxy_rank(progress_cb=cb, force=True)
+            from .core.resources import (
+                GITHUB_PROXY_MAX_AUTO_LATENCY_MS,
+                get_selected_github_proxy,
+                load_github_proxy_rank,
+            )
+
+            await self.resources.ensure_github_proxy_rank(progress_cb=cb, force=True)
             if not self.resources.use_github_proxy:
                 yield event.plain_result(
-                    "强制 GitHub 代理已关闭。\n"
-                    "请在配置面板开启 use_github_proxy 后再生效。"
+                    "GitHub 代理已关闭（use_github_proxy=false）。\n"
+                    "当前 GitHub / Gitee 均走直链。"
                 )
                 return
-
-            from .core.resources import load_github_proxy_rank, get_selected_github_proxy
 
             selected = self.resources.github_proxy or get_selected_github_proxy()
             if self.resources.github_proxy:
                 yield event.plain_result(
                     "已使用配置面板固定代理（优先生效）\n"
                     f"{self.resources.github_proxy}\n"
-                    "GitHub 链接将强制走该代理；Gitee 不受影响。"
-                )
-                return
-            if not ranked or not selected:
-                yield event.plain_result(
-                    "未测得可用代理，未能自动选择。\n"
-                    "请检查网络，或在配置面板填写 github_proxy。"
+                    "GitHub 将优先走该代理；Gitee 始终直链。"
                 )
                 return
 
-            lines = [
-                "GitHub 代理测速完成",
-                f"已自动选择最低延迟: {selected}",
-                "GitHub 链接将强制走代理；Gitee 不受影响。",
-                f"可用: {len(ranked)}",
-            ]
             cache = load_github_proxy_rank()
-            top = [x for x in (cache.get("proxies") or []) if x.get("available")][:3]
-            for idx, item in enumerate(top, 1):
+            available = [x for x in (cache.get("proxies") or []) if x.get("available")]
+            if not available:
+                yield event.plain_result(
+                    "未测得可用代理。\n"
+                    "GitHub 保持直链；也可在配置面板填写 github_proxy。"
+                )
+                return
+
+            best = available[0]
+            best_proxy = str(best.get("proxy") or "")
+            best_lat = best.get("latency")
+            lines_out = [
+                "GitHub 代理测速完成",
+                f"最低延迟: {best_proxy}  {best_lat} ms",
+            ]
+            if selected:
+                lines_out.append(
+                    f"已自动选用: {selected}（≤{GITHUB_PROXY_MAX_AUTO_LATENCY_MS} ms）"
+                )
+                lines_out.append("之后 GitHub 优先走代理，失败回退直链；Gitee 始终直链。")
+            else:
+                lines_out.append(
+                    f"网络不佳：最低延迟 > {GITHUB_PROXY_MAX_AUTO_LATENCY_MS} ms，不自动切换代理"
+                )
+                lines_out.append("GitHub 保持直链；Gitee 始终直链。")
+            lines_out.append(f"可用节点: {len(available)}")
+            for idx, item in enumerate(available[:3], 1):
                 mark = " <- 已选" if item.get("proxy") == selected else ""
-                lines.append(
+                lines_out.append(
                     f"{idx}. {item.get('proxy')}  {item.get('latency')} ms{mark}"
                 )
-            yield event.plain_result("\n".join(lines))
+            yield event.plain_result("\n".join(lines_out))
         except Exception as exc:
             logger.exception("代理测速失败")
             yield event.plain_result(f"代理测速失败: {exc}")
@@ -259,11 +328,6 @@ class MemePlugin(Star):
             "字体修复",
             "meme下载字体",
             "meme安装字体",
-            "meme字体修复2",
-            "字体修复2",
-            "meme下载字体2",
-            "meme安装字体2",
-            "meme字体修复gitee",
         },
     )
     async def meme_fix_fonts(self, event: AstrMessageEvent):
@@ -456,6 +520,16 @@ class MemePlugin(Star):
         keyword = self.manager.match_meme_keyword(text=param)
         if not keyword or keyword in self.conf["memes_disabled_list"]:
             return
+
+        # 全局计数：任意会话触发即 +1（hot/new/排行共用）
+        try:
+            from .core.usage import record_trigger
+
+            meme_obj = self.manager.find_meme(keyword)
+            usage_key = str(getattr(meme_obj, "key", "") or keyword) if meme_obj else keyword
+            record_trigger(usage_key)
+        except Exception as exc:
+            logger.debug("记录 meme 触发次数失败: %s", exc)
 
         # 保护反弹：目标命中保护名单时，强制把触发者作为被制作对象
         protected_users = self._parse_csv_set(self.conf.get("protected_users", ""))

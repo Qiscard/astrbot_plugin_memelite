@@ -55,6 +55,7 @@ GITHUB_PROXY_PROBE_PATH = (
 )
 GITHUB_PROXY_CACHE_TTL = 12 * 3600
 GITHUB_PROXY_PROBE_TIMEOUT = 8
+GITHUB_PROXY_MAX_AUTO_LATENCY_MS = 3000
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 FONT_EXTS = {".ttf", ".otf", ".ttc"}
@@ -257,14 +258,23 @@ def save_github_proxy_rank(rank: dict[str, Any]) -> None:
 
 
 def get_selected_github_proxy() -> str:
+    """Return explicitly selected proxy only (no silent fallback to any available)."""
     cache = load_github_proxy_rank()
     selected = normalize_github_proxy(str(cache.get("selected") or ""))
-    if selected:
-        return selected
+    if not selected:
+        return ""
+    # validate against threshold when latency is known
     for item in cache.get("proxies") or []:
-        if item.get("available") and item.get("proxy"):
-            return normalize_github_proxy(str(item.get("proxy")))
-    return ""
+        if str(item.get("proxy") or "") != selected:
+            continue
+        try:
+            lat = float(item.get("latency"))
+        except Exception:
+            return selected
+        if lat > GITHUB_PROXY_MAX_AUTO_LATENCY_MS:
+            return ""
+        return selected
+    return selected
 
 
 def set_selected_github_proxy(proxy: str) -> None:
@@ -339,14 +349,30 @@ async def rank_github_proxies(
                 progress_cb(f"代理可用: {item['proxy']}  延迟 {item['latency']} ms")
             else:
                 progress_cb(f"代理不可用: {item['proxy']}")
+    selected = ""
+    best = next((x for x in ranked if x.get("available")), None)
+    if best is not None:
+        latency = best.get("latency")
+        try:
+            latency_f = float(latency)
+        except Exception:
+            latency_f = None
+        if latency_f is not None and latency_f <= GITHUB_PROXY_MAX_AUTO_LATENCY_MS:
+            selected = str(best.get("proxy") or "")
+            if progress_cb:
+                progress_cb(
+                    f"已选最低延迟代理: {selected}（{latency} ms ≤ {GITHUB_PROXY_MAX_AUTO_LATENCY_MS} ms）"
+                )
+        elif progress_cb:
+            progress_cb(
+                f"网络不佳：最低延迟 {latency} ms > {GITHUB_PROXY_MAX_AUTO_LATENCY_MS} ms，"
+                "不自动切换代理，GitHub 仍走直链"
+            )
     save_github_proxy_rank(
         {
             "updated_at": int(time.time()),
             "proxies": ranked,
-            "selected": next(
-                (str(x["proxy"]) for x in ranked if x.get("available")),
-                "",
-            ),
+            "selected": selected,
         }
     )
     return ranked
@@ -358,9 +384,16 @@ def expand_urls_with_github_proxies(
     ranked_proxies: list[str] | None = None,
     fixed_proxy: str = "",
     use_proxy: bool = True,
-    force_proxy: bool = True,
+    force_proxy: bool = False,
 ) -> list[str]:
-    """Gitee unchanged. GitHub forced through proxy when use_proxy/force_proxy on."""
+    """Expand download candidates.
+
+    - Gitee / non-GitHub: always direct only.
+    - GitHub default: direct only.
+    - When panel github_proxy is set, or probe selected a proxy (latency <= 3000ms):
+      try proxy first, then fall back to direct (unless force_proxy with fixed proxy).
+    - Never inject untested proxy list blindly.
+    """
     if not urls:
         return []
     fixed_proxy = normalize_github_proxy(fixed_proxy)
@@ -373,8 +406,6 @@ def expand_urls_with_github_proxies(
             if x.get("available") and x.get("proxy")
         ]
     ranked_proxies = [normalize_github_proxy(p) for p in (ranked_proxies or []) if p]
-    if not ranked_proxies:
-        ranked_proxies = list(ASTRBOT_GITHUB_PROXIES) + list(LEGACY_GITHUB_PROXIES)
 
     out: list[str] = []
     seen: set[str] = set()
@@ -391,6 +422,7 @@ def expand_urls_with_github_proxies(
         if not use_proxy:
             add(url)
             continue
+
         preferred: list[str] = []
         if fixed_proxy:
             preferred.append(fixed_proxy)
@@ -399,9 +431,14 @@ def expand_urls_with_github_proxies(
         for p in ranked_proxies:
             if p and p not in preferred:
                 preferred.append(p)
-        for proxy in preferred:
-            add(apply_github_proxy(url, proxy))
-        if not force_proxy or not preferred:
+
+        if preferred:
+            for proxy in preferred:
+                add(apply_github_proxy(url, proxy))
+            # fallback direct unless forcing a fixed panel proxy only
+            if not (force_proxy and fixed_proxy):
+                add(url)
+        else:
             add(url)
     return out
 
@@ -919,6 +956,38 @@ def save_resource_index(index: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+
+def list_pack_footer_text() -> str:
+    """Footer for list image: 默认+x组额外表情包，最近更新：Y.M.D"""
+    from datetime import datetime
+
+    index = load_resource_index()
+    sources = index.get("sources") if isinstance(index.get("sources"), dict) else {}
+    extra_ok = 0
+    latest_ts = int(index.get("updated_at") or 0)
+    for sid, src in sources.items():
+        if not isinstance(src, dict):
+            continue
+        installed = int(src.get("installed_at") or 0)
+        if installed > latest_ts:
+            latest_ts = installed
+        if sid == DEFAULT_SOURCE_ID:
+            continue
+        if str(src.get("status") or "").lower() == "ok":
+            extra_ok += 1
+
+    if latest_ts > 0:
+        try:
+            dt = datetime.fromtimestamp(latest_ts)
+            date_s = f"{dt.year}.{dt.month}.{dt.day}"
+        except Exception:
+            date_s = "—"
+    else:
+        date_s = "—"
+    return f"默认+{extra_ok}组额外表情包，最近更新：{date_s}"
+
+
+
 def meme_module_exists(target_dir: Path | None, name: str) -> bool:
     if not target_dir:
         return False
@@ -956,16 +1025,17 @@ async def _download_to_path(
             return
         if proxy_enabled is False:
             logger.warning(
-                "GitHub 下载超时且未启用强制代理(use_github_proxy=false): %s。"
-                "可在配置面板开启「强制 GitHub 走代理」，或执行 /meme代理测速 后重试。",
+                "GitHub 下载超时且未启用代理(use_github_proxy=false): %s。"
+                "可开启 use_github_proxy 并执行 /meme代理测速，或填写 github_proxy。",
                 url,
             )
             return
         if proxy_enabled and not (selected_proxy or get_selected_github_proxy()):
             logger.warning(
-                "GitHub 下载超时且尚未选择可用代理: %s。"
-                "请执行 /meme代理测速 自动选择最低延迟代理，或在配置面板填写 github_proxy。",
+                "GitHub 直链下载超时且无已选代理: %s。"
+                "可执行 /meme代理测速（最低延迟≤%sms 才会自动选用），或填写 github_proxy。",
                 url,
+                GITHUB_PROXY_MAX_AUTO_LATENCY_MS,
             )
 
     for url in urls:
@@ -974,14 +1044,15 @@ async def _download_to_path(
         try:
             if progress_cb:
                 progress_cb(f"尝试下载: {url}（超时 {timeout_sec}s）")
+            connect_budget = min(30, max(10, timeout_sec // 6))
             client_timeout = aiohttp.ClientTimeout(
                 total=timeout_sec,
-                connect=min(30, timeout_sec),
-                sock_connect=min(30, timeout_sec),
-                sock_read=timeout_sec,
+                connect=connect_budget,
+                sock_connect=connect_budget,
+                sock_read=min(timeout_sec, max(30, timeout_sec // 2)),
             )
             started = time.monotonic()
-            async with session.get(url, timeout=client_timeout) as resp:
+            async with session.get(url, timeout=client_timeout, allow_redirects=True) as resp:
                 if resp.status != 200:
                     last_error = RuntimeError(f"HTTP {resp.status} for {url}")
                     continue
@@ -993,10 +1064,16 @@ async def _download_to_path(
                             raise asyncio.TimeoutError(
                                 f"下载超过 {timeout_sec} 秒"
                             )
+                        if not chunk:
+                            continue
                         f.write(chunk)
                         downloaded += len(chunk)
                 if downloaded <= 0:
                     raise RuntimeError(f"空响应: {url}")
+                if total > 0 and downloaded < total:
+                    raise RuntimeError(
+                        f"下载不完整: {downloaded}/{total} bytes from {url}"
+                    )
                 tmp.replace(dest)
                 if progress_cb:
                     mb = downloaded / 1024 / 1024
@@ -1008,19 +1085,22 @@ async def _download_to_path(
         except asyncio.TimeoutError as exc:
             last_error = RuntimeError(f"下载超时({timeout_sec}s): {url}")
             _safe_unlink(tmp)
-            # also clear incomplete final dest if partially replaced somehow
             if dest.is_file() and dest.stat().st_size <= 0:
                 _safe_unlink(dest)
             logger.warning("下载超时 %s: %s", url, exc)
             _timeout_hint(url)
             if progress_cb:
-                progress_cb(str(last_error) + "，已清除缓存")
+                progress_cb(str(last_error) + "，已清除临时缓存")
+        except asyncio.CancelledError:
+            _safe_unlink(tmp)
+            raise
         except Exception as exc:
             last_error = exc
             _safe_unlink(tmp)
-            logger.warning(f"下载失败 {url}: {exc}")
+            logger.warning("下载失败 %s: %s", url, exc)
             if progress_cb:
                 progress_cb(f"下载失败: {url} -> {exc}")
+    _safe_unlink(dest.with_suffix(dest.suffix + ".part"))
     raise RuntimeError(f"所有下载源失败: {last_error}")
 
 
@@ -1060,12 +1140,12 @@ class ResourceInstaller:
         progress_cb: Callable[[str], None] | None = None,
         force: bool = False,
     ) -> list[str]:
-        """Probe proxies and auto-select lowest latency (panel github_proxy overrides)."""
+        """Probe proxies; auto-select only if best latency <= 3000ms. Panel proxy overrides."""
         if not self.use_github_proxy:
             self._ranked_proxies = []
             self._selected_proxy = ""
             if progress_cb:
-                progress_cb("强制 GitHub 代理已关闭（配置 use_github_proxy=false）")
+                progress_cb("GitHub 代理已关闭（use_github_proxy=false），仅直链")
             return []
 
         if self.github_proxy:
@@ -1083,52 +1163,85 @@ class ResourceInstaller:
             for x in (cache.get("proxies") or [])
             if x.get("available") and x.get("proxy")
         ]
-        selected = normalize_github_proxy(str(cache.get("selected") or "")) or (
-            cached[0] if cached else ""
-        )
+        selected = normalize_github_proxy(str(cache.get("selected") or ""))
+        # Drop stale auto-selection if recorded latency is above threshold.
+        if selected:
+            for item in cache.get("proxies") or []:
+                if str(item.get("proxy") or "") != selected:
+                    continue
+                try:
+                    lat = float(item.get("latency"))
+                except Exception:
+                    lat = None
+                if lat is not None and lat > GITHUB_PROXY_MAX_AUTO_LATENCY_MS:
+                    selected = ""
+                break
+        if not selected and False:
+            # do not auto-pick first cached proxy without threshold check
+            pass
 
-        if not force and cached and selected and (
+        if not force and cached and (
             age <= GITHUB_PROXY_CACHE_TTL or not self.proxy_probe_on_fix
         ):
             self._ranked_proxies = cached
             self._selected_proxy = selected
             if progress_cb:
-                progress_cb(f"使用已选 GitHub 代理: {selected}（缓存 {age}s）")
+                if selected:
+                    progress_cb(f"使用已选 GitHub 代理: {selected}（缓存 {age}s）")
+                else:
+                    progress_cb(f"使用 GitHub 直链（缓存 {age}s，无合格代理）")
             return cached
 
         session = await self._get_session()
         ranked = await rank_github_proxies(session, progress_cb=progress_cb)
-        available = [str(x["proxy"]) for x in ranked if x.get("available")]
-        if available:
-            best = available[0]
-            cache = {
-                "updated_at": int(time.time()),
-                "proxies": ranked,
-                "selected": best,
-            }
-            save_github_proxy_rank(cache)
-            self._selected_proxy = best
-            self._ranked_proxies = available
+        available_items = [x for x in ranked if x.get("available")]
+        available = [str(x["proxy"]) for x in available_items]
+        cache = load_github_proxy_rank()
+        selected = normalize_github_proxy(str(cache.get("selected") or ""))
+        self._ranked_proxies = available
+        self._selected_proxy = selected
+        if selected:
             if progress_cb:
-                progress_cb(f"已自动选择最低延迟代理: {best}")
+                best_lat = None
+                for x in available_items:
+                    if str(x.get("proxy")) == selected:
+                        best_lat = x.get("latency")
+                        break
+                progress_cb(
+                    f"已自动选择最低延迟代理: {selected}"
+                    + (f"（{best_lat} ms）" if best_lat is not None else "")
+                )
             return available
 
-        self._ranked_proxies = list(ASTRBOT_GITHUB_PROXIES)
+        if available_items:
+            latency = available_items[0].get("latency")
+            msg = (
+                f"网络不佳：最低延迟 {latency} ms > {GITHUB_PROXY_MAX_AUTO_LATENCY_MS} ms，"
+                "不自动切换代理，GitHub 保持直链"
+            )
+            logger.warning(msg)
+            if progress_cb:
+                progress_cb(msg)
+            return available
+
+        self._ranked_proxies = []
         self._selected_proxy = ""
         logger.warning(
-            "GitHub 代理测速无可用节点。请执行 /meme代理测速 重试，或在配置面板填写 github_proxy。"
+            "GitHub 代理测速无可用节点。将使用直链；也可在配置面板填写 github_proxy。"
         )
         if progress_cb:
-            progress_cb("未测得可用代理；请检查网络或填写自定义代理")
-        return self._ranked_proxies
+            progress_cb("未测得可用代理；GitHub 将走直链，也可填写自定义代理")
+        return []
 
     def prepare_urls(self, urls: list[str]) -> list[str]:
+        """Gitee direct; GitHub direct unless proxy selected/configured."""
+        force = bool(self.github_proxy)
         return expand_urls_with_github_proxies(
             urls,
             ranked_proxies=self._ranked_proxies,
             fixed_proxy=self.github_proxy,
             use_proxy=self.use_github_proxy,
-            force_proxy=self.use_github_proxy,
+            force_proxy=force,
         )
 
     async def _download_urls(
@@ -1214,7 +1327,7 @@ class ResourceInstaller:
         if missing_sources:
             lines.append(f"- 不完整资源源: {missing_sources}")
         if error_sources:
-            lines.append(f"- 失败资源源: {error_sources}（见 /meme资源列表）")
+            lines.append(f"- 失败资源源: {error_sources}（见 /meme列表）")
         if img_count < 50 and not sources:
             lines.append("- 表情资源可能未完整安装，请执行 /meme表情修复")
         if font_count < 3:

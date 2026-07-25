@@ -142,29 +142,36 @@ class MemeManager:
 
     @staticmethod
     def _meme_sort_name(meme: Any) -> str:
-        key = str(getattr(meme, "key", "") or "")
-        if key:
-            return key
+        """Name used for list sorting: first keyword (display), else key."""
         info = getattr(meme, "info", None)
         if info is not None and hasattr(info, "keywords"):
-            kws = list(info.keywords or [])
+            kws = [str(x).strip() for x in list(info.keywords or []) if str(x).strip()]
         else:
-            kws = list(getattr(meme, "keywords", []) or [])
-        return str(kws[0] if kws else "")
+            kws = [str(x).strip() for x in list(getattr(meme, "keywords", []) or []) if str(x).strip()]
+        if kws:
+            return kws[0]
+        return str(getattr(meme, "key", "") or "").strip()
 
     @classmethod
-    def _meme_sort_key(cls, meme: Any) -> tuple[int, str]:
-        """Sort: 0-9, then a-z, then other symbols."""
-        name = cls._meme_sort_name(meme).lower()
+    def _meme_sort_key(cls, meme: Any) -> tuple[int, str, str]:
+        """Sort by first char category: 0-9 → a-z → symbols/other.
+
+        Only ordering changes; pagination / labels / layout stay the same.
+        """
+        raw = cls._meme_sort_name(meme)
+        name = raw.casefold() if hasattr(raw, "casefold") else raw.lower()
+        key = str(getattr(meme, "key", "") or "").casefold()
         if not name:
-            cat = 3
-        elif name[0].isdigit():
+            return (3, "", key)
+        ch = name[0]
+        if ch.isdigit():
             cat = 0
-        elif "a" <= name[0] <= "z":
+        elif "a" <= ch <= "z":
             cat = 1
         else:
+            # Chinese, punctuation, emoji, fullwidth, etc.
             cat = 2
-        return (cat, name)
+        return (cat, name, key)
 
     def sorted_memes(self) -> list[Any]:
         if not self._ensure_memes_loaded():
@@ -354,16 +361,194 @@ class MemeManager:
             return first_word
         return None
 
-    async def render_meme_list_image(self) -> bytes | None:
-        """Render meme list image sorted by name: 0-9, a-z, then symbols."""
-        memes = self.sorted_memes() if hasattr(self, "sorted_memes") else (
-            sorted(self.memes, key=self._meme_sort_key) if self._ensure_memes_loaded() else []
+    def _meme_kind(self, meme: Any) -> str:
+        """image if needs images, else text."""
+        try:
+            params = self._get_params(meme)
+            max_images = int(getattr(params, "max_images", 0) or 0)
+            if max_images > 0:
+                return "image"
+        except Exception:
+            pass
+        return "text"
+
+    def _list_style(self) -> str:
+        style = str(self.conf.get("meme_list_style") or "standard").strip().lower()
+        if style in {"compact", "dense", "4", "四列", "紧凑"}:
+            return "compact"
+        return "standard"
+
+    def _list_page_size(self, style: str) -> int:
+        raw = self.conf.get("meme_list_page_size")
+        try:
+            value = int(raw)
+        except Exception:
+            value = 0
+        if value > 0:
+            return max(12, min(1000, value))
+        # standard: 3x30=90; compact: 4x40=160
+        return 160 if style == "compact" else 90
+
+    def _build_example(self, meme, keywords: list[str]) -> str:
+        """Standard-mode secondary line.
+
+        Format: 拍 @[图x2] <字>
+        - [] optional params
+        - <> required params
+        """
+        kws = [str(k).strip() for k in (keywords or []) if str(k).strip()]
+        if not kws:
+            key = str(getattr(meme, "key", "") or "").strip()
+            kws = [key] if key else ["?"]
+
+        extra = str(self.conf.get("extra_prefix") or "").strip()
+        trigger = f"{extra}{kws[0]}" if extra else kws[0]
+        parts: list[str] = [trigger]
+
+        try:
+            params = self._get_params(meme)
+            min_images = int(getattr(params, "min_images", 0) or 0)
+            max_images = int(getattr(params, "max_images", 0) or 0)
+            min_texts = int(getattr(params, "min_texts", 0) or 0)
+            max_texts = int(getattr(params, "max_texts", 0) or 0)
+
+            if max_images > 0:
+                if min_images <= 0:
+                    # optional images
+                    parts.append(f"@[图x{max_images}]" if max_images > 1 else "@[图]")
+                elif min_images == max_images:
+                    parts.append(f"<@图x{min_images}>" if min_images > 1 else "<@图>")
+                else:
+                    parts.append(f"<@图{min_images}-{max_images}>")
+
+            if max_texts > 0:
+                if min_texts <= 0:
+                    parts.append(f"[字x{max_texts}]" if max_texts > 1 else "[字]")
+                elif min_texts == max_texts:
+                    parts.append(f"<字x{min_texts}>" if min_texts > 1 else "<字>")
+                else:
+                    parts.append(f"<字{min_texts}-{max_texts}>")
+        except Exception:
+            pass
+
+        return " ".join(parts)
+
+    def build_list_items(self) -> list[Any]:
+        """Build sorted list items with usage labels for custom renderer."""
+        from .list_render import ListItem
+        from .usage import compute_labels, ensure_keys, get_counts
+
+        memes = self.sorted_memes()
+        if not memes:
+            return []
+
+        keys = [str(getattr(m, "key", "") or "") for m in memes]
+        ensure_keys([k for k in keys if k])
+        counts = get_counts()
+
+        try:
+            new_days = int(self.conf.get("meme_new_days", 3) or 0)
+        except Exception:
+            new_days = 3
+        try:
+            hot_min = int(self.conf.get("meme_hot_min_count", 3) or 0)
+        except Exception:
+            hot_min = 3
+        # 0 = disable corresponding label
+        labels_map = compute_labels(
+            [k for k in keys if k],
+            new_days=max(0, new_days),
+            hot_min_count=max(0, hot_min),
+            hot_top_n=0,  # 0 means no top-N limit; pure threshold
         )
+
+        items: list[ListItem] = []
+        for meme in memes:
+            key = str(getattr(meme, "key", "") or "")
+            kws = self._get_keywords(meme)
+            items.append(
+                ListItem(
+                    key=key or (kws[0] if kws else "unknown"),
+                    keywords=list(kws),
+                    kind=self._meme_kind(meme),
+                    labels=list(labels_map.get(key, [])),
+                    count=int(counts.get(key, 0) or 0),
+                    example=self._build_example(meme, list(kws)),
+                )
+            )
+        return items
+
+    async def render_meme_list_images(self) -> list[bytes]:
+        """Render one or more list images: name-sorted, paginated, with new/hot."""
+        items = self.build_list_items()
+        if not items:
+            return []
+
+        style = self._list_style()
+        page_size = self._list_page_size(style)
+        try:
+            from .list_render import render_meme_list_images
+            from .usage import usage_summary_text
+
+            try:
+                from .resources import list_pack_footer_text
+
+                footer_text = list_pack_footer_text()
+            except Exception:
+                footer_text = ""
+            images = await asyncio.to_thread(
+                render_meme_list_images,
+                items,
+                style=style,
+                page_size=page_size,
+                title="meme表情列表",
+                footer_text=footer_text,
+            )
+            logger.info(
+                "自定义表情列表渲染完成: style=%s page_size=%s pages=%s items=%s\n%s",
+                style,
+                page_size,
+                len(images),
+                len(items),
+                usage_summary_text(),
+            )
+            return images
+        except Exception as e:
+            logger.error("自定义表情列表渲染失败，尝试官方渲染: %s", e)
+
+        # fallback: official single image, still sorted
+        one = await self.render_meme_list_image_official()
+        return [one] if one else []
+
+    async def render_meme_list_image(self) -> bytes | None:
+        """Backward-compatible single image API (first page)."""
+        images = await self.render_meme_list_images()
+        return images[0] if images else None
+
+    async def render_meme_list_image_official(self) -> bytes | None:
+        """Official meme-generator list renderer fallback."""
+        memes = self.sorted_memes()
         if not memes or not self.render_meme_list_func:
             return None
         try:
+            from .usage import compute_labels
+
+            keys = [str(getattr(m, "key", "") or "") for m in memes]
+            labels_map = compute_labels(
+                [k for k in keys if k],
+                new_days=int(self.conf.get("meme_new_days", 3) or 0),
+                hot_min_count=int(self.conf.get("meme_hot_min_count", 3) or 0),
+                hot_top_n=0,
+            )
+
             if self.is_py_version:
-                meme_list = [(m, LegacyMemeProperties(labels=[])) for m in memes]
+                meme_list = []
+                for m in memes:
+                    key = str(getattr(m, "key", "") or "")
+                    labs = labels_map.get(key, [])
+                    # official only accepts new/hot
+                    labs2 = [x for x in labs if x in ("new", "hot")]
+                    meme_list.append((m, LegacyMemeProperties(labels=labs2)))  # type: ignore[arg-type]
                 rendered = self.render_meme_list_func(
                     meme_list=meme_list,  # type: ignore[arg-type]
                     text_template="{index}.{keywords}",
@@ -371,7 +556,20 @@ class MemeManager:
                 )
                 return self._unwrap_bytes(rendered, "render meme list")
 
-            meme_props = {m.key: self.MemePropertiesType() for m in memes}
+            meme_props = {}
+            for m in memes:
+                key = str(getattr(m, "key", "") or "")
+                labs = [x for x in labels_map.get(key, []) if x in ("new", "hot")]
+                try:
+                    meme_props[m.key] = self.MemePropertiesType(labels=labs)
+                except TypeError:
+                    prop = self.MemePropertiesType()
+                    if hasattr(prop, "labels"):
+                        try:
+                            prop.labels = labs
+                        except Exception:
+                            pass
+                    meme_props[m.key] = prop
             kwargs = dict(
                 meme_properties=meme_props,
                 exclude_memes=[],
@@ -451,13 +649,16 @@ class MemeManager:
                 result = await self.run_sync(meme)(
                     images=meme_images, texts=texts, args=options
                 )
-                return self._unwrap_bytes(result, f"generate meme {meme.key}")
+                data = self._unwrap_bytes(result, f"generate meme {meme.key}")
+            else:
+                meme_images = [
+                    self.MemeImage(name=str(name), data=data) for name, data in images
+                ]
+                result = await asyncio.to_thread(meme.generate, meme_images, texts, options)
+                data = self._unwrap_bytes(result, f"generate meme {meme.key}")
 
-            meme_images = [
-                self.MemeImage(name=str(name), data=data) for name, data in images
-            ]
-            result = await asyncio.to_thread(meme.generate, meme_images, texts, options)
-            return self._unwrap_bytes(result, f"generate meme {meme.key}")
+            # usage counted at trigger time in main.meme_handle (global)
+            return data
         except Exception as e:
             logger.error(f"生成meme {keyword} 失败: {e}")
             return None
