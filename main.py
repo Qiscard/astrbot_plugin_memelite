@@ -531,7 +531,7 @@ class MemePlugin(Star):
         except Exception as exc:
             logger.debug("记录 meme 触发次数失败: %s", exc)
 
-        # 保护反弹：目标命中保护名单时，强制把触发者作为被制作对象
+        # 保护反弹：目标命中保护名单时触发；单图仅发送者，双图为保护方+发送者
         protected_users = self._parse_csv_set(self.conf.get("protected_users", ""))
         bounce_memes = self._parse_csv_set(self.conf.get("bounce_back_memes", ""))
         should_bounce = False

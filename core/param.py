@@ -96,8 +96,9 @@ class ParamsCollector:
         """收集参数，返回 (images, texts, options)
 
         force_sender_as_target=True 表示反弹保护：
-        - 忽略原目标 @/引用，强制把“触发者”作为被制作对象
-        - protected_user_id 仅用于判定，不应成为被制作对象
+        - 忽略原目标 @/引用
+        - 单图表情：仅使用发送者（被反弹方）头像
+        - 双图及以上：第 1 张=被保护方（反弹方），第 2 张=发送者（被反弹方）
         """
         images: list[tuple[str, bytes]] = []
         texts: list[str] = []
@@ -151,26 +152,57 @@ class ParamsCollector:
 
         # 补齐图片
         if force_sender_as_target:
-            # 反弹：强制以触发者作为被制作对象（第 1 张），不足再补 bot
-            # 不再使用被保护者头像，也不沿用 @/引用目标
+            # 反弹：
+            # - 1 张：仅发送者（被反弹方）
+            # - 2 张及以上：被保护方（反弹方）在前，发送者（被反弹方）在后
             rebuilt: list[tuple[str, bytes]] = []
-            display_name = sender_name
-            if result := await self.get_extra(event, send_id):
-                display_name = str(result[0] or sender_name)
-                options["name"], options["gender"] = result[0], result[1]
-            if sender_avatar := await self.get_avatar(send_id):
-                rebuilt.append((display_name, sender_avatar))
-            if len(rebuilt) < params.min_images:
+            max_images = int(getattr(params, "max_images", 0) or 0)
+            min_images = int(getattr(params, "min_images", 0) or 0)
+
+            sender_display = sender_name
+            sender_extra = await self.get_extra(event, send_id)
+            if sender_extra:
+                sender_display = str(sender_extra[0] or sender_name)
+            sender_avatar = await self.get_avatar(send_id)
+
+            if max_images <= 1:
+                # 单图：只显示被反弹的发送者
+                if sender_extra:
+                    options["name"], options["gender"] = sender_extra[0], sender_extra[1]
+                if sender_avatar:
+                    rebuilt.append((sender_display, sender_avatar))
+            else:
+                # 双图：反弹方（被保护）= 第 1 张，被反弹方（发送者）= 第 2 张
+                protected_id = str(protected_user_id or "").strip()
+                if protected_id:
+                    protected_name = f"User{protected_id}"
+                    protected_extra = await self.get_extra(event, protected_id)
+                    if protected_extra:
+                        protected_name = str(protected_extra[0] or protected_name)
+                        options["name"], options["gender"] = (
+                            protected_extra[0],
+                            protected_extra[1],
+                        )
+                    if protected_avatar := await self.get_avatar(protected_id):
+                        rebuilt.append((protected_name, protected_avatar))
+
+                if sender_avatar:
+                    rebuilt.append((sender_display, sender_avatar))
+                elif not rebuilt and sender_extra:
+                    # 双头像都失败时至少保留名称信息
+                    options.setdefault("name", sender_display)
+
+            # 仍不足时再补 bot / 消息内主动发图
+            if len(rebuilt) < min_images:
                 if bot_avatar := await self.get_avatar(self_id):
                     rebuilt.append(("bot", bot_avatar))
-            # 若仍不足，再保留消息内用户主动发的图
-            if len(rebuilt) < params.min_images:
+            if len(rebuilt) < min_images:
                 for item in images:
                     if item not in rebuilt:
                         rebuilt.append(item)
-                    if len(rebuilt) >= params.min_images:
+                    if len(rebuilt) >= min_images:
                         break
-            images = rebuilt[: params.max_images]
+            images = rebuilt[: max_images if max_images > 0 else len(rebuilt)]
         else:
             if len(images) < params.min_images:
                 if sender_avatar := await self.get_avatar(send_id):
