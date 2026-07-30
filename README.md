@@ -133,6 +133,22 @@ meme_generator/memes/<表情名>/逻辑文件 + 图片
 | `添加保护` / `移除保护` / `保护名单` | 保护名单 | 管理员 |
 | `添加反弹表情` / `移除反弹表情` / `反弹表情列表` | 反弹 | 管理员 |
 
+## 头像获取
+
+配置项 `avatar_fetch_mode`：
+
+| 值 | 说明 | 适用 |
+|------|------|------|
+| `auto`（默认） | 按平台/用户ID自动选择 | 多平台、省心，推荐 |
+| `onebot` | 强制数字 QQ 号 `qlogo` | 仅 OneBot/数字QQ号，自动判错时 |
+| `qq_official` | 强制 `qqapp/{appid}/{openid}` | 仅 QQ 官方机器人，自动判错时 |
+
+- **OneBot / 数字 QQ 号**：`qlogo.cn/headimg_dl?dst_uin={qq}`
+- **QQ 官方机器人（openid）**：`http://q.qlogo.cn/qqapp/{appid}/{openid}/640`
+  - `appid` 优先自动读取适配器（`event.bot` / platform config）
+  - 自动失败时可在插件配置填写 `qq_official_appid`
+- 同时会尝试事件自带 `avatar`、以及 `bot.getUser` / `get_stranger_info` 等通用接口
+- 保护名单 / 用户黑名单：OneBot 填 QQ 号，官方机器人填 **openid 字符串**
 ## 使用
 
 - 参数空格分隔，如：`喜报 nmsl`

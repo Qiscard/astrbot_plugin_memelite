@@ -392,8 +392,10 @@ class MemePlugin(Star):
         if not user_id:
             yield event.plain_result("未指定要保护的用户ID")
             return
-        if not user_id.isdigit():
-            yield event.plain_result("用户ID必须是数字")
+        user_id = self._normalize_uid(user_id)
+        # OneBot: QQ number; QQ official bot: openid string
+        if not user_id or user_id.lower() in {"all", "qq_official"}:
+            yield event.plain_result("请提供有效的用户ID（QQ号或 openid）")
             return
 
         protected_list = self._parse_csv_set(self.conf.get("protected_users", ""))
@@ -416,6 +418,7 @@ class MemePlugin(Star):
         if not user_id:
             yield event.plain_result("未指定要移除的用户ID")
             return
+        user_id = self._normalize_uid(user_id)
 
         protected_list = self._parse_csv_set(self.conf.get("protected_users", ""))
         if user_id not in protected_list:
@@ -628,15 +631,33 @@ class MemePlugin(Star):
                 if qq in protected and qq != sender_id:
                     return qq
 
-        # 3) 纯文本 @123456
+        # 3) plain @123456 / @openid and QQ official <@openid>
+        from .utils import extract_mention_ids
+
+        candidates: list[str] = []
+        try:
+            candidates.extend(extract_mention_ids(event.get_message_str()))
+        except Exception:
+            pass
         for seg in chain:
             if isinstance(seg, Comp.Plain):
-                for word in (seg.text or "").replace("​", " ").split():
+                plain = str(getattr(seg, "text", "") or "")
+                candidates.extend(extract_mention_ids(plain))
+                for word in plain.replace("\u200b", " ").split():
                     token = word.strip()
-                    if token.startswith("@") and token[1:].isdigit():
-                        qq = self._normalize_uid(token[1:])
-                        if qq in protected and qq != sender_id:
-                            return qq
+                    if token.startswith("@") and len(token) > 1:
+                        candidates.append(token[1:])
+
+        seen: set[str] = set()
+        for raw_id in candidates:
+            qq = self._normalize_uid(raw_id)
+            if not qq or qq in seen:
+                continue
+            seen.add(qq)
+            if qq.lower() == "all" or qq == self_id or qq == sender_id:
+                continue
+            if qq in protected:
+                return qq
 
         return None
 

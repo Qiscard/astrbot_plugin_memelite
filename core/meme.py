@@ -351,14 +351,43 @@ class MemeManager:
         return meme_name in self.meme_keywords
 
     def match_meme_keyword(self, text: str) -> str | None:
-        """精确匹配消息首词是否为 meme 关键词"""
+        """Match meme keyword; support QQ official glued <@openid> mentions."""
         if not self._ensure_memes_loaded():
             return None
-        if not text.strip():
+        raw = (text or "").strip()
+        if not raw:
             return None
-        first_word = text.split()[0] if text.split() else ""
+
+        from ..utils import strip_mention_tags
+
+        normalized = strip_mention_tags(raw)
+        if not normalized:
+            return None
+
+        # 1) first whitespace-separated token after stripping mention tags
+        first_word = normalized.split()[0]
         if first_word in self.meme_keywords:
             return first_word
+
+        # 2) longest keyword prefix (Chinese commands often have no spaces)
+        best = ""
+        for kw in self.meme_keywords:
+            if not kw:
+                continue
+            if normalized == kw or normalized.startswith(kw):
+                rest = normalized[len(kw):]
+                # avoid "hi" matching inside "history"-like ascii tokens
+                if rest and kw.isascii() and rest[0].isalnum():
+                    continue
+                if len(kw) > len(best):
+                    best = kw
+        if best:
+            return best
+
+        # 3) raw first token fallback
+        raw_first = raw.split()[0] if raw.split() else raw
+        if raw_first in self.meme_keywords:
+            return raw_first
         return None
 
     def _meme_kind(self, meme: Any) -> str:
@@ -640,7 +669,11 @@ class MemeManager:
 
         params = self._get_params(meme)
         images, texts, options = await self.collect.collect_params(
-            event, params, force_sender_as_target, protected_user_id
+            event,
+            params,
+            force_sender_as_target,
+            protected_user_id,
+            trigger_keyword=keyword,
         )
 
         try:

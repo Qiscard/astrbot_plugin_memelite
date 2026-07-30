@@ -75,6 +75,23 @@
         },
         "default": 15
     },
+    "avatar_fetch_mode": {
+        "description": "头像获取模式",
+        "type": "string",
+        "hint": "auto=自动检测（推荐，多平台最省心）；onebot=强制数字QQ号 qlogo；qq_official=强制官方机器人 openid/qqapp。一般保持 auto；仅当自动判错或头像异常时再手动切换。",
+        "options": [
+            "auto",
+            "onebot",
+            "qq_official"
+        ],
+        "default": "auto"
+    },
+    "qq_official_appid": {
+        "description": "QQ官方机器人AppID",
+        "type": "string",
+        "hint": "可选。用于 QQ 官方机器人（openid）头像：http://q.qlogo.cn/qqapp/{appid}/{openid}/640。一般可自动从适配器读取；仅当自动获取失败时再手动填写。",
+        "default": ""
+    },
     "memes_disabled_list": {
         "description": "meme黑名单",
         "type": "list",
@@ -84,13 +101,13 @@
     "user_blacklist": {
         "description": "用户黑名单",
         "type": "string",
-        "hint": "黑名单中的用户无法使用该插件，多个用户ID用逗号分隔，例如：12345,23456,34567",
+        "hint": "黑名单中的用户无法使用该插件，多个用户ID用逗号分隔。OneBot 填 QQ 号；QQ 官方机器人填 openid。例如：12345,AbCdEfOpenId",
         "default": ""
     },
     "protected_users": {
         "description": "保护名单",
         "type": "string",
-        "hint": "保护名单中的用户被保护，对他们使用反弹表情会反弹给触发者，多个用户ID用逗号分隔，例如：12345,23456,34567",
+        "hint": "保护名单中的用户被保护，对他们使用反弹表情会反弹给触发者，多个用户ID用逗号分隔。OneBot 填 QQ 号；QQ 官方机器人填 openid。例如：12345,AbCdEfOpenId",
         "default": ""
     },
     "bounce_back_memes": {

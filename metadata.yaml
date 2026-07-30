@@ -2,7 +2,7 @@ name: astrbot_plugin_memelite
 display_name: 表情包生成器
 desc: 表情包生成器（本地轻量；增量资源/代理测速/美化列表/全局热度排行）
 help: 发送 /meme检查 /meme列表 /meme排行；管理员 /meme表情修复 /meme字体修复 /meme代理测速 /meme重置
-version: v3.6.1
+version: v3.6.4
 author: Qiscard
 repo: https://github.com/Qiscard/astrbot_plugin_memelite
 original_author: Zhalslar
