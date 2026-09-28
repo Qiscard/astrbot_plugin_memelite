@@ -128,13 +128,17 @@ def _resolve_fonts() -> tuple[str, str, str | None]:
         "NotoSansCJK-Bold.ttc",
         "msyh.ttc",
     ]
+    # Prefer scalable emoji fonts (COLR/SVG/monochrome). Bitmap-strike color
+    # fonts (NotoColorEmoji CBDT, Apple Color Emoji sbix) only carry a large
+    # fixed strike (~109px) and degrade to boxes at the ~17px label size, so
+    # they are listed last as a fallback only.
     emoji_names = [
-        "seguiemj.ttf",  # Segoe UI Emoji (Windows)
+        "seguiemj.ttf",  # Segoe UI Emoji (Windows, COLR)
         "SegoeUIEmoji.ttf",
-        "NotoColorEmoji.ttf",
-        "NotoEmoji-Regular.ttf",
-        "Apple Color Emoji.ttc",
-        "TwitterColorEmoji-SVGinOT.ttf",
+        "TwitterColorEmoji-SVGinOT.ttf",  # SVG, scalable
+        "NotoEmoji-Regular.ttf",  # monochrome, scalable
+        "NotoColorEmoji.ttf",  # CBDT bitmap strike, does not scale small
+        "Apple Color Emoji.ttc",  # sbix bitmap strike
     ]
 
     reg_list = _find_named_fonts(preferred_reg)
